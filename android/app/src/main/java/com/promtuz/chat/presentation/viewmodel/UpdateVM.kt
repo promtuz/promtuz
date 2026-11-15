@@ -11,7 +11,6 @@ class UpdateVM(private val updates: UpdateRepository) : ViewModel() {
     val notes = updates.notes
     val required = updates.required
     val installedChannel = updates.installedChannel
-    val installedChanges = updates.installedChanges
     val history = updates.history
     val historyLoading = updates.historyLoading
     val historyError = updates.historyError

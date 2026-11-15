@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.camera
 
+import com.promtuz.chat.ui.components.Button
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -48,7 +49,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable

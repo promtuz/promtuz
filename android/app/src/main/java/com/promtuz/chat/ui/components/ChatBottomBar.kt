@@ -6,6 +6,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
@@ -39,11 +40,9 @@ import com.promtuz.chat.ui.text.EmojiTextField
 import com.promtuz.chat.ui.text.EmojiFieldController
 import com.promtuz.chat.ui.text.EmojiText
 import com.promtuz.chat.ui.text.clock
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
@@ -549,7 +548,9 @@ private fun ComposerRow(
     val textExit = rememberComposerTextExit(sentRevision, input) { metrics.sendTransition = it }
     val sendError by viewModel.composerError.collectAsState()
     LaunchedEffect(sendError) { if (sendError != null) textExit.reject() }
-    val busy = sending || textExit.capturing
+    // A send that ends with the text still in the field failed, error or not.
+    LaunchedEffect(sending) { if (!sending && input.isNotEmpty()) textExit.hiding = false }
+    val busy = sending
     val editing = action as? ComposerAction.Edit
     val canClearCaption = editing?.msg?.content is MessageContent.Image || editing?.msg?.content is MessageContent.Attachment
     val hasContent = input.isNotBlank() || staged.isNotEmpty()
@@ -603,12 +604,14 @@ private fun ComposerRow(
                     Modifier.heightIn(min = 38.dp).padding(vertical = 7.dp),
                     contentAlignment = Alignment.CenterStart,
                 ) {
-                    if (input.isEmpty()) Text(
-                        if (staged.isEmpty()) "Message" else "Caption",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = colors.onSurfaceVariant,
-                    )
-                    inner()
+                    androidx.compose.animation.AnimatedVisibility(input.isEmpty() || textExit.hiding, enter = fadeIn(tween(120)), exit = ExitTransition.None) {
+                        Text(
+                            if (staged.isEmpty()) "Message" else "Caption",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    Box(Modifier.graphicsLayer { alpha = if (textExit.hiding) 0f else 1f }) { inner() }
                 }
             },
         )
@@ -635,7 +638,7 @@ private fun ComposerRow(
                 .semantics { contentDescription = if (hasContent || action is ComposerAction.Edit) "Send message" else "Record voice message" }
                 .clickable(enabled = !busy && (hasDraft || (!hasContent && action !is ComposerAction.Edit))) {
                     if (hasDraft) {
-                        if (input.isNotEmpty() && action !is ComposerAction.Edit) textExit.submit(viewModel::send)
+                        if (input.isNotEmpty() && action !is ComposerAction.Edit) textExit.submit { viewModel.send(); viewModel.composerBusy.value }
                         else viewModel.send()
                     } else onMic()
                 },

@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.material3.LocalTextStyle
-import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -195,7 +194,7 @@ private fun MessageLinkTarget(link: MessageLink, label: String, geometry: LinkGe
             onClick = open,
             onClickLabel = "Open link",
             onLongClickLabel = "Link options",
-            indication = ripple(color = color),
+            indication = com.promtuz.chat.ui.components.PressHighlight,
         )
     }
 }

@@ -1,92 +1,208 @@
 package com.promtuz.chat.ui.screens
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.text.format.DateUtils
 import androidx.annotation.DrawableRes
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.net.toUri
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavKey
+import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
+import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.presentation.viewmodel.BackupRestoreVM
+import com.promtuz.chat.presentation.viewmodel.ProfileVM
+import com.promtuz.chat.presentation.viewmodel.StickersVM
+import com.promtuz.chat.presentation.viewmodel.UpdateVM
+import com.promtuz.chat.ui.appearance.AppearanceStore
+import com.promtuz.chat.ui.components.AppIconButton
+import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.SettingsSection
 import com.promtuz.chat.ui.components.GroupedScreen
+import com.promtuz.chat.ui.components.Radii
+import com.promtuz.chat.ui.components.concentric
 import com.promtuz.chat.ui.components.listPadding
+import com.promtuz.chat.ui.theme.Promtuz
+import com.promtuz.chat.update.offered
+import com.promtuz.core.CoreBridge
+import org.koin.androidx.compose.koinViewModel
 
-private data class SettingItem(
+private class SettingRow(
     val title: String,
-    val summary: String,
     @param:DrawableRes val icon: Int,
-    val route: NavKey,
+    val value: String? = null,
+    val valueColor: Color? = null,
+    val onClick: () -> Unit,
 )
 
-private data class SettingGroup(val name: String, val items: List<SettingItem>)
-
 @Composable
-fun SettingsScreen(appViewModel: AppVM) {
+fun SettingsScreen(
+    appViewModel: AppVM,
+    profileVM: ProfileVM,
+    updates: UpdateVM = koinViewModel(),
+    stickers: StickersVM = koinViewModel(),
+    backup: BackupRestoreVM = koinViewModel(),
+) {
+    val context = LocalContext.current
+    val c = Promtuz.colors
+    val nav = appViewModel.navigator
+    val profile by profileVM.profile.collectAsState()
+    val appearance by AppearanceStore.appearance.collectAsState()
+    val update by updates.state.collectAsState()
+    val channel by updates.channel.collectAsState()
+    val packs by stickers.packs.collectAsStateWithLifecycle()
+    val lastBackup by backup.lastBackup.collectAsState()
+
+    // Values owned by other screens or by core have no stream; reread them each time Settings shows.
+    var notifications by remember { mutableStateOf(true) }
+    var everyone by remember { mutableStateOf<Boolean?>(null) }
+    var relaysUp by remember { mutableStateOf<Int?>(null) }
+    LifecycleResumeEffect(Unit) {
+        notifications = ChatPrefs.notifEnabled && (ChatPrefs.notifChats || ChatPrefs.notifGroups || ChatPrefs.notifRequests)
+        onPauseOrDispose {}
+    }
+    LaunchedEffect(Unit) {
+        profileVM.refresh()
+        everyone = runCatching { CoreBridge.messageRequestsEnabled() }.getOrNull()
+        relaysUp = runCatching { CoreBridge.relays().count { it.isConnected } }.getOrNull()
+    }
+
+    fun open(intent: Intent) = try { context.startActivity(intent) } catch (_: ActivityNotFoundException) {}
+    fun go(route: NavKey) = { nav.push(route) }
+
     val groups = listOf(
-        SettingGroup("Identity", listOf(
-            SettingItem("Profile", "Your name, photo and bio", R.drawable.i_user, Routes.Profile),
-            SettingItem(
-                stringResource(R.string.identity_keys_title), "QR code and recovery phrase",
-                R.drawable.i_key, Routes.IdentityKeys,
-            ),
-        )),
-        SettingGroup("Chats", listOf(
-            SettingItem("Privacy", "Who can message you, and blocked people", R.drawable.i_shield_lock, Routes.PrivacySettings),
-            SettingItem(
-                "Notifications", "Alerts and message previews",
-                R.drawable.i_notifications, Routes.NotificationsSettings,
-            ),
-            SettingItem(
-                "Chat appearance", "Theme, bubbles and wallpaper",
-                R.drawable.i_chat_settings, Routes.ChatAppearance,
-            ),
-            SettingItem("Stickers", "Create and manage packs", R.drawable.i_sticker, Routes.Stickers),
-        )),
-        SettingGroup("Data & connection", listOf(
-            SettingItem("Storage", "Media and space usage", R.drawable.i_usage_chart, Routes.Storage),
-            SettingItem(
-                "Backup & restore", "Save or restore an encrypted backup",
-                R.drawable.i_chat_backup, Routes.BackupRestore,
-            ),
-            SettingItem("Relay nodes", "Connections and latency", R.drawable.i_network_nodes, Routes.Relays),
-        )),
-        SettingGroup("App", listOf(
-            SettingItem("Updates", "App version and update channel", R.drawable.i_update, Routes.Updates),
-            SettingItem("About Promtuz", "Share, source code and licenses", R.drawable.i_info, Routes.About),
-        )),
+        listOf(
+            SettingRow("Notifications", R.drawable.i_notifications, if (notifications) "On" else "Off", onClick = go(Routes.NotificationsSettings)),
+            SettingRow("Privacy and security", R.drawable.i_shield_lock, everyone?.let { if (it) "Everyone" else "My contacts" }, onClick = go(Routes.PrivacySettings)),
+            SettingRow("Appearance", R.drawable.i_chat_settings, appearance.themeMode.name, onClick = go(Routes.ChatAppearance)),
+            SettingRow("Stickers", R.drawable.i_sticker, packs.size.takeIf { it > 0 }?.let { if (it == 1) "1 pack" else "$it packs" }, onClick = go(Routes.Stickers)),
+        ),
+        listOf(
+            SettingRow("Recovery phrase", R.drawable.i_key, onClick = go(Routes.RecoveryPhrase)),
+            SettingRow("Backup", R.drawable.i_chat_backup, lastBackup?.let { relativeDay(it) } ?: "Never", onClick = go(Routes.BackupRestore)),
+            SettingRow("Storage", R.drawable.i_usage_chart, onClick = go(Routes.Storage)),
+        ),
+        listOf(
+            SettingRow("Relays", R.drawable.i_network_nodes, relaysUp?.let { "$it connected" }, onClick = go(Routes.Relays)),
+            SettingRow("Updates", R.drawable.i_update, update.offered?.let { "${it.versionName} available" },
+                valueColor = c.accent, onClick = go(Routes.Updates)),
+        ),
+        listOf(
+            SettingRow("Invite a friend", R.drawable.i_user_add) {
+                val link = "https://apt.promtuz.dev/apk/$channel/arm64-v8a/latest.apk"
+                open(Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "Promtuz for Android")
+                        .putExtra(Intent.EXTRA_TEXT, "Let's talk on Promtuz\n$link"),
+                    "Invite a friend",
+                ))
+            },
+            SettingRow("Help and feedback", R.drawable.i_help) {
+                open(Intent(Intent.ACTION_VIEW, "https://github.com/promtuz/promtuz/issues".toUri()))
+            },
+            SettingRow("About Promtuz", R.drawable.i_logo_mono, onClick = go(Routes.About)),
+        ),
     )
 
     GroupedScreen({ Text("Settings") }) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = padding.listPadding(),
-            verticalArrangement = Arrangement.Top,
-        ) {
-            groups.forEachIndexed { groupIndex, group ->
-                item(key = "heading-${group.name}", contentType = "heading") {
-                    SettingsSection(group.name, top = if (groupIndex == 0) 0.dp else 20.dp)
-                }
-                itemsIndexed(group.items, key = { _, item -> item.route.toString() }, contentType = { _, _ -> "setting" }) { index, setting ->
-                    GroupedActionRow(
-                        title = setting.title,
-                        index = index,
-                        groupSize = group.items.size,
-                        onClick = { appViewModel.navigator.push(setting.route) },
-                        supportingText = setting.summary,
-                    ) {
-                        DrawableIcon(setting.icon, size = 24.dp)
-                    }
-                }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(top = 6.dp, bottom = 24.dp)) {
+            item("profile") {
+                ProfileCard(
+                    name = profile.name,
+                    bio = profile.bio,
+                    identity = profile.identity,
+                    picture = profile.picture,
+                    onOpen = go(Routes.Profile),
+                    onQr = go(Routes.ShareIdentity),
+                )
+            }
+            groups.forEachIndexed { g, rows -> settingCard(g, rows) }
+            item("footer") {
+                Text(
+                    "Promtuz ${BuildConfig.VERSION_NAME} · ${updates.installedChannel.replaceFirstChar { it.uppercase() }} channel",
+                    Modifier.fillMaxWidth().padding(top = 18.dp),
+                    style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
+                    color = c.muted,
+                    textAlign = TextAlign.Center,
+                )
             }
         }
     }
 }
+
+private fun LazyListScope.settingCard(group: Int, rows: List<SettingRow>) {
+    item("gap-$group") { Spacer(Modifier.height(12.dp)) }
+    rows.forEachIndexed { i, row ->
+        item(row.title, contentType = "setting") {
+            GroupedActionRow(
+                title = row.title,
+                index = i,
+                groupSize = rows.size,
+                onClick = row.onClick,
+                value = row.value,
+                valueColor = row.valueColor,
+            ) { DrawableIcon(row.icon, size = 24.dp) }
+        }
+    }
+}
+
+@Composable
+private fun ProfileCard(
+    name: String,
+    bio: String,
+    identity: String,
+    picture: com.promtuz.chat.utils.media.AvatarPicture?,
+    onOpen: () -> Unit,
+    onQr: () -> Unit,
+) {
+    val c = Promtuz.colors
+    val pad = 16.dp
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radii.card))
+            .background(c.card)
+            .clickable(role = Role.Button, onClick = onOpen)
+            .padding(pad),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Avatar(name.ifBlank { "?" }, size = 64.dp, identityKey = identity.ifBlank { name }, image = picture)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(name, style = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.Medium),
+                color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(bio.ifBlank { "Add a bio" }, style = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
+                color = c.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Box(Modifier.clip(RoundedCornerShape(concentric(Radii.card, pad))).background(c.cardHigh)) {
+            AppIconButton(R.drawable.oi_qr_code, "My QR code", onQr, Modifier.size(48.dp), tint = c.accent)
+        }
+    }
+}
+
+private fun relativeDay(ms: Long): String =
+    DateUtils.getRelativeTimeSpanString(ms, System.currentTimeMillis(), DateUtils.DAY_IN_MILLIS).toString()

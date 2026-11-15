@@ -129,8 +129,6 @@ class UpdateRepository(private val context: Context) {
         nativeChannel
     } else ChatPrefs.updateChannel?.takeIf { it in CHANNELS } ?: nativeChannel
     val installedChannel: String get() = nativeChannel
-    private val _installedChanges = MutableStateFlow(installedChanges(emptyList()))
-    val installedChanges: StateFlow<InstalledChanges> = _installedChanges.asStateFlow()
     private val _history = MutableStateFlow<List<ReleaseNote>>(emptyList())
     val history: StateFlow<List<ReleaseNote>> = _history.asStateFlow()
     private val _historyLoading = MutableStateFlow(false)
@@ -219,19 +217,11 @@ class UpdateRepository(private val context: Context) {
         return Offer(manifest, releaseNotes(selectedChannel, abi, manifest))
     }
 
-    private fun installedChanges(notes: List<ReleaseNote>): InstalledChanges = InstalledChanges(
-        notesStore.previousVersion, notesStore.version, notesStore.previousCode, notesStore.code,
-        notes.filter {
-            it.code <= notesStore.code && it.code > (notesStore.previousCode ?: (notesStore.code - 1))
-        },
-    )
-
     private suspend fun refreshNoteViews() {
         val notes = withContext(Dispatchers.IO) {
             notesStore.cached(nativeChannel).filter { it.code <= notesStore.code }
         }
         _history.value = notes
-        _installedChanges.value = installedChanges(notes)
     }
 
     private fun readNote(selectedChannel: String, abi: String, code: Long): ReleaseNote? {

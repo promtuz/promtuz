@@ -114,7 +114,6 @@ fun SearchableHeader(
         colors = topBarColors,
         connectionStatus = false,
         actions = {
-            if (showActionsWhileSearching) actions()
             AnimatedVisibility(!searching, enter = fadeIn(ChatMotion.spec()) + expandHorizontally(ChatMotion.spec()),
                 exit = fadeOut(ChatMotion.spec()) + shrinkHorizontally(ChatMotion.spec())) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -124,6 +123,7 @@ fun SearchableHeader(
                     if (!showActionsWhileSearching) actions()
                 }
             }
+            if (showActionsWhileSearching) actions()
         },
     )
 }

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.TextButton
 import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTransformGestures

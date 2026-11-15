@@ -1,11 +1,15 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.TextButton
+import com.promtuz.chat.ui.components.Button
+import com.promtuz.chat.ui.components.OutlinedButton
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -21,14 +25,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.sp
+import com.promtuz.chat.ui.components.Radii
+import com.promtuz.chat.ui.components.RowSubtitleStyle
+import com.promtuz.chat.ui.components.SegmentedTabs
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -75,7 +83,8 @@ fun LogsScreen() {
     var confirmClear by remember { mutableStateOf(false) }
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    var severity by rememberSaveable { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf(0) }
+    val severity = Tabs[tab].second
     val source = paused ?: live
     val logs = remember(source, query, severity) {
         source.filter { log -> log.priority >= severity && (query.isBlank() ||
@@ -83,7 +92,7 @@ fun LogsScreen() {
     }
     val listState = rememberLazyListState()
     val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-    ScreenScaffold(scrollableState = listState, topBar = { scroll ->
+    ScreenScaffold(scrollableState = listState, containerColor = Promtuz.colors.groupedPage, topBar = { scroll ->
         SearchableHeader(
             title = "App logs", close = false, searching = searching, query = query,
             onQuery = { query = it }, onSearch = { searching = true }, searchLabel = "Search logs",
@@ -104,17 +113,12 @@ fun LogsScreen() {
             },
         )
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("All" to 0, "Info" to 4, "Warnings" to 5, "Errors" to 6).forEach { (label, value) ->
-                    FilterChip(selected = severity == value, onClick = { severity = value }, label = { Text(label) })
-                }
-            }
-            if (paused != null) Text("Updates paused", Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding() + 6.dp)) {
+            SegmentedTabs(Tabs.map { it.first }, tab, Modifier.padding(horizontal = 12.dp)) { tab = it }
+            if (paused != null) Text("Updates paused", Modifier.padding(start = 28.dp, end = 28.dp, top = 10.dp),
+                style = RowSubtitleStyle, color = Promtuz.colors.muted)
             if (logs.isEmpty()) Text(if (query.isNotBlank() || severity > 0) "No matching logs" else "No logs yet",
-                Modifier.padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Modifier.padding(horizontal = 28.dp, vertical = 16.dp), style = RowSubtitleStyle, color = Promtuz.colors.muted)
             else LogsContainer(logs, Modifier.weight(1f), PaddingValues(bottom = padding.calculateBottomPadding()), listState)
         }
     }
@@ -204,79 +208,64 @@ fun LogsContainer(
     padding: PaddingValues = PaddingValues(0.dp),
     listState: LazyListState = rememberLazyListState(),
 ) {
+    val c = Promtuz.colors
+    // Newest first with a reversed layout: the list reads top to bottom in time and follows new lines.
     LazyColumn(
-        modifier
-            .fillMaxWidth()
-            .fillMaxHeight(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = padding.calculateBottomPadding() + 12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
+        modifier.fillMaxWidth().fillMaxHeight(),
+        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = padding.calculateBottomPadding() + 12.dp),
+        verticalArrangement = Arrangement.Top,
         state = listState,
-        reverseLayout = true
+        reverseLayout = true,
     ) {
-        items(logs, key = { it.id }) { log ->
-            SelectionContainer(Modifier.fillMaxWidth()) {
-                LogEntry(log)
-            }
+        itemsIndexed(logs, key = { _, it -> it.id }) { i, log ->
+            val top = i == logs.lastIndex
+            val bottom = i == 0
+            val r = Radii.card
+            SelectionContainer(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(if (top) r else 0.dp, if (top) r else 0.dp, if (bottom) r else 0.dp, if (bottom) r else 0.dp))
+                    .background(c.card)
+                    .padding(start = 16.dp, end = 16.dp, top = if (top) 14.dp else 5.dp, bottom = if (bottom) 14.dp else 5.dp),
+            ) { LogEntry(log) }
         }
     }
 }
 
 @Composable
 fun LogEntry(log: AppLog) {
-    val color = when (prioLabel(log.priority)) {
-        "V" -> Color(0xFF9E9E9E)
-        "D" -> Color(0xFF42A5F5)
-        "I" -> Color(0xFF66BB6A)
-        "W" -> Color(0xFFFFA726)
-        "E" -> Color(0xFFEF5350)
-        "F" -> Color(0xFFAB47BC)
-        else -> Color.Unspecified
+    val c = Promtuz.colors
+    val tone = when {
+        log.priority >= 6 -> c.danger
+        log.priority == 5 -> c.warn
+        else -> c.accent
     }
-
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(12.dp, 10.dp)
-    ) {
-        Row(verticalAlignment = Alignment.Top) {
-            Text(
-                text = prioLabel(log.priority),
-                style = MaterialTheme.typography.labelSmall,
-                color = color,
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = formatTime(log.time),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-            )
-            log.tag?.let {
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "[$it]",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(formatTime(log.time), style = LogMeta, color = c.muted)
+            log.tag?.takeIf { it.isNotBlank() }?.let {
+                Text(it, Modifier.clip(RoundedCornerShape(5.dp)).background(tone.copy(alpha = 0.16f)).padding(horizontal = 5.dp, vertical = 1.dp),
+                    style = LogMeta, color = tone)
             }
         }
-        Text(
-            text = log.message,
-            style = MaterialTheme.typography.bodyMediumEmphasized,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-
-        log.t?.let {
+        Text(log.message, style = LogText, color = c.text)
+        log.t?.let { t ->
+            // Traces run to dozens of lines; a few show until the line is tapped.
+            var open by rememberSaveable(log.id) { mutableStateOf(false) }
+            val trace = remember(t) { t.stackTraceToString().trimEnd().lines().map(String::trim) }
+            val shown = if (open || trace.size <= TraceLines + 1) trace else trace.take(TraceLines)
             Text(
-                text = it.stackTraceToString(),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+                shown.joinToString("\n") + if (shown.size < trace.size) "\n… ${trace.size - shown.size} more lines" else "",
+                Modifier.clickable(onClickLabel = if (open) "Collapse" else "Expand") { open = !open },
+                style = LogMeta, color = c.danger.copy(alpha = 0.85f),
             )
         }
     }
 }
+
+private const val TraceLines = 4
+private val Tabs = listOf("All" to 0, "Errors" to 6, "Info" to 4)
+private val LogText = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp)
+private val LogMeta = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
 
 fun prioLabel(p: Int) = when (p) {
     2 -> "V"

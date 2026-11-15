@@ -5,7 +5,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.promtuz.chat.ui.screens.StorageScreen
-import com.promtuz.chat.ui.screens.BackupRestoreScreen
 import com.promtuz.chat.navigation.NavStage
 import com.promtuz.chat.navigation.Routes
 import androidx.navigation3.runtime.rememberNavBackStack
@@ -23,10 +22,8 @@ class ManageSpace : ComponentActivity() {
                 NavStage(stack, { if (stack.size > 1) stack.removeLastOrNull() else finish() }) { route ->
                     NavEntry(route) {
                         when (route) {
-                            Routes.BackupRestore -> BackupRestoreScreen()
                             is Routes.StorageChat -> StorageScreen(conversation = route.conversation, chatName = route.name)
                             else -> StorageScreen(
-                                onOpenBackup = { if (stack.last() != Routes.BackupRestore) stack.add(Routes.BackupRestore) },
                                 onOpenChat = { conversation, name ->
                                     val destination = Routes.StorageChat(conversation, name)
                                     if (stack.last() != destination) stack.add(destination)

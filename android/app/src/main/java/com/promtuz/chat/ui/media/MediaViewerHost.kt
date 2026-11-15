@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.media
 
+import com.promtuz.chat.ui.components.TextButton
 import android.widget.Toast
 import androidx.activity.BackEventCompat
 import androidx.activity.compose.LocalActivity
@@ -642,8 +643,8 @@ private fun Chrome(
         onDismissRequest = { confirmSave = false },
         title = { Text("Save to gallery?") },
         text = { Text("The saved copy will be available outside this locked chat.") },
-        confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmSave = false; onSave(item) }) { Text("Save") } },
-        dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmSave = false }) { Text("Cancel") } },
+        confirmButton = { TextButton(onClick = { confirmSave = false; onSave(item) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = { confirmSave = false }) { Text("Cancel") } },
     )
     if (showInfo) MediaInfoDialog(item) { showInfo = false }
     val white = Color.White

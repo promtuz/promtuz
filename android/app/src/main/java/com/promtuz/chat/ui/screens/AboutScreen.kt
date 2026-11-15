@@ -4,38 +4,37 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
-import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
-import com.promtuz.chat.ui.components.MorphGlyph
-import com.promtuz.chat.ui.components.MorphIcon
-import com.promtuz.chat.ui.components.DrawableIcon
-import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.GroupedScreen
+import com.promtuz.chat.ui.components.*
+import com.promtuz.chat.ui.theme.Promtuz
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
-fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel()) {
+fun AboutScreen(onOpenLicenses: () -> Unit, onOpenHistory: () -> Unit, updates: UpdateVM = koinViewModel()) {
     val context = LocalContext.current
     val channel by updates.channel.collectAsState()
     // Share the phone build even from an emulator. Updating this device still uses its own ABI.
@@ -49,57 +48,50 @@ fun AboutScreen(onOpenLicenses: () -> Unit, updates: UpdateVM = koinViewModel())
         }
     }
 
-    GroupedScreen({ Text("About Promtuz") }) { padding ->
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            contentPadding = padding.listPadding(top = 24.dp, bottom = 32.dp),
-            verticalArrangement = Arrangement.Top,
+    val c = Promtuz.colors
+    GroupedScreen({ Text("About") }) { padding ->
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 12.dp, bottom = 24.dp)),
         ) {
-            item("app") {
-                Column(
-                    Modifier.fillMaxWidth().padding(bottom = 32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Image(painterResource(R.drawable.logo_colored), null, Modifier.size(88.dp))
-                    Text("Promtuz", style = MaterialTheme.typography.headlineLarge)
-                    Text(
-                        "${BuildConfig.VERSION_NAME} · ${if (BuildConfig.DEBUG) "Debug" else "Release"}",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        "Private messaging. Open source.",
-                        Modifier.padding(top = 6.dp),
-                        style = MaterialTheme.typography.bodyLarge,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            }
-            item("share") {
-                GroupedActionRow(
-                    "Share Promtuz", 0, 3,
-                    onClick = {
-                        open(Intent.createChooser(
-                            Intent(Intent.ACTION_SEND).setType("text/plain")
-                                .putExtra(Intent.EXTRA_SUBJECT, "Promtuz for Android")
-                                .putExtra(Intent.EXTRA_TEXT, "Download Promtuz for Android\n$downloadLink"),
-                            "Share Promtuz",
-                        ))
+            Column(
+                Modifier.fillMaxWidth().padding(bottom = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Image(painterResource(R.drawable.logo_colored), null, Modifier.size(88.dp))
+                Text("Promtuz", Modifier.padding(top = 18.dp),
+                    style = TextStyle(fontSize = 28.sp, lineHeight = 34.sp, fontWeight = FontWeight.SemiBold), color = c.text)
+                Text("Private messaging. Open source.", Modifier.padding(top = 4.dp), style = RowValueStyle, color = c.muted)
+                Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(color = c.text, fontWeight = FontWeight.Medium)) { append("Version ${BuildConfig.VERSION_NAME}") }
+                        append(" · ${channelLabel(updates.installedChannel)}")
                     },
-                    supportingText = "Android · ${channel.replaceFirstChar { it.uppercase() }}",
-                ) { DrawableIcon(R.drawable.i_link, size = 24.dp) }
+                    Modifier.padding(top = 14.dp).clip(RoundedCornerShape(14.dp)).background(c.card)
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                    style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted,
+                )
             }
-            item("source") {
-                GroupedActionRow("Source code", 1, 3, onClick = {
+            SettingsCard {
+                SettingsRow("What’s new", icon = R.drawable.i_download, trailing = Trailing.Chevron, onClick = onOpenHistory)
+                SettingsRow("Source code", subtitle = "github.com/promtuz", leading = {
+                    MorphIcon(MorphGlyph.Code, null, Modifier.size(24.dp), tint = c.muted)
+                }, leadingSize = 24.dp, trailing = Trailing.External, onClick = {
                     open(Intent(Intent.ACTION_VIEW, "https://github.com/promtuz/promtuz".toUri()))
-                }) { MorphIcon(MorphGlyph.Code, null, Modifier.size(26.dp)) }
+                })
+                SettingsRow("Open source licenses", icon = R.drawable.oi_info, trailing = Trailing.Chevron, onClick = onOpenLicenses)
             }
-            item("licenses") {
-                GroupedActionRow("Open source licenses", 2, 3, onOpenLicenses) {
-                    DrawableIcon(R.drawable.i_info, size = 24.dp)
-                }
+            CardGap()
+            SettingsCard {
+                SettingsRow("Share Promtuz", icon = R.drawable.oi_export, trailing = Trailing.Chevron, onClick = {
+                    open(Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).setType("text/plain")
+                            .putExtra(Intent.EXTRA_SUBJECT, "Promtuz for Android")
+                            .putExtra(Intent.EXTRA_TEXT, "Download Promtuz for Android\n$downloadLink"),
+                        "Share Promtuz",
+                    ))
+                })
             }
         }
     }
 }
+

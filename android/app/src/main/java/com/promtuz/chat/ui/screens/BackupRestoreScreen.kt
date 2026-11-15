@@ -1,50 +1,44 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.TextButton
+import com.promtuz.chat.ui.components.GroupedScreen
+import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.text.format.Formatter
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
-import com.promtuz.chat.presentation.viewmodel.BackupLogLevel
-import com.promtuz.chat.presentation.viewmodel.BackupLogLine
+import com.promtuz.chat.presentation.viewmodel.BackupOutcome
 import com.promtuz.chat.presentation.viewmodel.BackupRestoreVM
-import com.promtuz.chat.ui.components.DrawableIcon
-import com.promtuz.chat.ui.components.GroupedScreen
+import com.promtuz.chat.ui.components.*
 import org.koin.androidx.compose.koinViewModel
 
-/** Developer utility. Restore is additive: it only adds rows it doesn't already have. */
+/** Restore is additive: it only adds rows it doesn't already have. */
 @Composable
 fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
-    val console by viewModel.console.collectAsState()
+    val c = Promtuz.colors
+    val context = LocalContext.current
+    val lastBackup by viewModel.lastBackup.collectAsState()
+    val bytes by viewModel.bytes.collectAsState()
     val busy by viewModel.busy.collectAsState()
+    val outcome by viewModel.outcome.collectAsState()
 
     val saveCopy = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -54,124 +48,79 @@ fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let(viewModel::restoreFrom) }
 
-    GroupedScreen({ Text("Backup & Restore") }, actions = {
-        IconButton(viewModel::clearConsole) {
-            DrawableIcon(R.drawable.oi_broom, desc = "Clear console", size = 20.dp)
-        }
-    }) { padding ->
+    GroupedScreen({ Text("Backup") }) { padding ->
         Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 6.dp, bottom = 24.dp)),
         ) {
-            Notice()
-
             Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically,
             ) {
-                Button(
-                    viewModel::snapshot,
-                    Modifier.weight(1f),
-                    enabled = !busy,
-                ) { Text("Take snapshot") }
-                OutlinedButton(
-                    { saveCopy.launch(viewModel.suggestedFileName()) },
-                    Modifier.weight(1f),
-                    enabled = !busy,
-                ) { Text("Save a copy") }
-            }
-
-            OutlinedButton(
-                { pickBackup.launch(arrayOf("*/*")) },
-                Modifier.fillMaxWidth(),
-                enabled = !busy,
-            ) {
-                if (busy) {
-                    CircularProgressIndicator(Modifier.size(18.dp))
-                } else {
-                    Text("Restore from a .pzbk file")
+                val tint = if (lastBackup != null) c.success else c.muted
+                Box(
+                    Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(tint.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center,
+                ) { DrawableIcon(R.drawable.i_chat_backup, size = 24.dp, tint = tint) }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(lastBackup?.let { "Backed up ${relative(it)}" } ?: "No backup yet",
+                        style = TextStyle(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium), color = c.text)
+                    Text(
+                        if (lastBackup != null) "${Formatter.formatShortFileSize(context, bytes)} · updates when you leave the app"
+                        else "Promtuz backs up when you leave the app",
+                        style = RowSubtitleStyle, color = c.muted,
+                    )
                 }
             }
-
-            Console(console, Modifier.weight(1f))
-        }
-    }
-}
-
-@Composable
-private fun Notice() {
-    val colors = MaterialTheme.colorScheme
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.large)
-            .background(colors.surfaceContainerLow)
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(
-                painterResource(R.drawable.i_encrypted),
-                null,
-                Modifier.size(18.dp),
-                tint = colors.onSurfaceVariant,
-            )
-            Text(
-                "Restore only adds what's missing",
-                style = MaterialTheme.typography.labelLarge,
-                color = colors.onSurface,
-            )
-        }
-        Text(
-            "Nothing already on this device is replaced, renamed or deleted. A backup " +
-                "decrypts under your own key, so its contents can be edited by whoever " +
-                "holds it — a live message always wins over the file.",
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun Console(lines: List<BackupLogLine>, modifier: Modifier = Modifier) {
-    val state = rememberLazyListState()
-
-    LaunchedEffect(lines.size) {
-        if (lines.isNotEmpty()) state.animateScrollToItem(lines.lastIndex)
-    }
-
-    LazyColumn(
-        modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.largeIncreased)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(10.dp),
-        state = state,
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        items(lines, key = { it.id }) { l ->
-            SelectionContainer {
-                Text(
-                    l.text,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = if (l.level == BackupLogLevel.STEP) FontWeight.Bold else null,
-                    color = levelColor(l.level),
+            CardGap()
+            AppButton("Back up now", viewModel::snapshot, Modifier.fillMaxWidth(), busy = busy)
+            CardGap()
+            SettingsCard(
+                header = "Move to another phone",
+                footer = "Backups are encrypted with your recovery phrase. Without it, nobody can open them, including you.",
+            ) {
+                SettingsRow(
+                    "Save a copy", subtitle = "Export an encrypted file", icon = R.drawable.oi_export,
+                    trailing = Trailing.Chevron, enabled = !busy && lastBackup != null,
+                    onClick = { saveCopy.launch(viewModel.suggestedFileName()) },
+                )
+                SettingsRow(
+                    "Restore from a file", subtitle = "Adds chats and messages missing here", icon = R.drawable.i_download,
+                    trailing = Trailing.Chevron, enabled = !busy,
+                    onClick = { pickBackup.launch(arrayOf("*/*")) },
                 )
             }
         }
     }
+
+    outcome?.let { result ->
+        val (title, text) = when (result) {
+            is BackupOutcome.Failed -> result.title to result.text
+            is BackupOutcome.Restored -> restoredCopy(result)
+        }
+        AppAlertDialog(
+            onDismissRequest = viewModel::dismissOutcome,
+            title = { Text(title) },
+            text = { Text(text) },
+            confirmButton = { TextButton(viewModel::dismissOutcome) { Text("OK") } },
+        )
+    }
 }
 
-/** Same palette the App Logs console uses, so severity reads identically. */
-@Composable
-private fun levelColor(level: BackupLogLevel): Color = when (level) {
-    BackupLogLevel.STEP -> MaterialTheme.colorScheme.onSurface
-    BackupLogLevel.INFO -> MaterialTheme.colorScheme.onSurfaceVariant
-    BackupLogLevel.OK -> Color(0xFF66BB6A)
-    BackupLogLevel.WARN -> Color(0xFFFFA726)
-    BackupLogLevel.ERR -> Color(0xFFEF5350)
+private fun relative(time: Long): String {
+    val now = System.currentTimeMillis()
+    return if (now - time < DateUtils.MINUTE_IN_MILLIS) "just now"
+    else DateUtils.getRelativeTimeSpanString(time, now, DateUtils.MINUTE_IN_MILLIS).toString()
+}
+
+private fun restoredCopy(r: BackupOutcome.Restored): Pair<String, String> {
+    fun count(n: Int, one: String) = if (n == 1) "1 $one" else "$n ${one}s"
+    val parts = listOfNotNull(
+        count(r.chats, "chat").takeIf { r.chats > 0 },
+        count(r.contacts, "contact").takeIf { r.contacts > 0 },
+        count(r.messages, "message").takeIf { r.messages > 0 },
+    )
+    val old = if (r.unreachable) " This backup is from an older version, so its messages couldn't be restored." else ""
+    if (parts.isEmpty()) return "Nothing new to restore" to "Everything in this backup is already on this device.$old"
+    val list = if (parts.size == 1) parts[0] else parts.dropLast(1).joinToString(", ") + " and " + parts.last()
+    return "Backup restored" to "Added $list.$old"
 }

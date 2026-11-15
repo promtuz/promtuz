@@ -45,8 +45,8 @@ private val RowInset = 16.dp
 
 /**
  * One row of a card: siblings sit flush and the card's divider runs under every row but the last,
- * starting at the text. A row with a trailing [control] is one semantic control and presses by
- * scaling, so the label and the control share the feedback.
+ * starting at the text. A row with a trailing [control] is one semantic control, so the label
+ * and the control share one touch target.
  */
 @Composable
 fun GroupedActionRow(
@@ -58,6 +58,7 @@ fun GroupedActionRow(
     enabled: Boolean = true,
     supportingText: String? = null,
     value: String? = null,
+    valueColor: androidx.compose.ui.graphics.Color? = null,
     titleColor: androidx.compose.ui.graphics.Color? = null,
     checked: Boolean? = null,
     selected: Boolean? = null,
@@ -66,9 +67,7 @@ fun GroupedActionRow(
 ) {
     val c = Promtuz.colors
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed && control != null) 0.98f else 1f, spring(stiffness = 900f), label = "settingPress")
-    val indication = if (control == null) LocalIndication.current else null
+    val indication = LocalIndication.current
     val action = when {
         checked != null -> Modifier.toggleable(checked, interaction, indication, enabled, Role.Switch) { onClick() }
         selected != null -> Modifier.selectable(selected, interaction, indication, enabled, Role.RadioButton, onClick)
@@ -79,8 +78,7 @@ fun GroupedActionRow(
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val dividerStart = if (icon != null) RowInset + RowGlyph + RowGap else RowInset
     Row(modifier.fillMaxWidth()
-        .graphicsLayer { scaleX = scale; scaleY = scale }
-        .clip(groupedRoundShape(index, groupSize, major = 20, minor = 0))
+        .clip(groupedRoundShape(index, groupSize, major = Radii.card.value.toInt(), minor = 0))
         .background(c.card)
         .then(action)
         .drawBehind {
@@ -101,7 +99,7 @@ fun GroupedActionRow(
             Text(title, style = RowTitleStyle, color = titleColor ?: c.text)
             supportingText?.let { Text(it, style = RowSubtitleStyle, color = c.muted) }
         }
-        value?.let { Text(it, Modifier.alpha(alpha), style = RowValueStyle, color = c.muted) }
+        value?.let { Text(it, Modifier.alpha(alpha), style = RowValueStyle, color = valueColor ?: c.muted) }
         control?.invoke()
     }
 }

@@ -11,7 +11,6 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,11 +70,12 @@ fun QueuedAnimatedNumber(
         durationMillis, minOf(16, durationMillis),
         ContentProgression.Integers, contentAlignment, label, maxDurationMillis,
         fixedContent = { values ->
-            Text(numberPrefix(values), style = numberStyle, color = color, maxLines = 1,
-                overflow = TextOverflow.Clip)
+            // An empty Text skips line-height trimming and would make the strip taller than a digit.
+            val prefix = numberPrefix(values)
+            if (prefix.isNotEmpty()) Text(prefix, style = numberStyle, color = color, softWrap = false)
         }) { value, values ->
-        Text(value.toString().drop(numberPrefix(values).length), style = numberStyle,
-            color = color, maxLines = 1, overflow = TextOverflow.Clip)
+        val suffix = value.toString().drop(numberPrefix(values).length)
+        if (suffix.isNotEmpty()) Text(suffix, style = numberStyle, color = color, softWrap = false)
     }
 }
 

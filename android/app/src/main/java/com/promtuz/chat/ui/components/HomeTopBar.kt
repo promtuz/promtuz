@@ -1,7 +1,6 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -13,7 +12,9 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
-import com.promtuz.chat.ui.theme.gradientScrim
+import com.promtuz.chat.ui.util.freezeOnExit
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeEffect
 import com.promtuz.chat.ui.theme.transparentTopAppBar
 
 
@@ -21,11 +22,16 @@ import com.promtuz.chat.ui.theme.transparentTopAppBar
 fun HomeTopBar(
     appViewModel: AppVM,
     showSearch: Boolean = false,
+    haze: HazeState? = null,
+    glass: () -> Float = { 0f },
 ) {
-    // Home deliberately keeps its gradient over the scrolling chat list.
+    // At rest the bar is the page; glass fades in once chats slide under it.
     TopAppBar(
-        modifier = Modifier.background(gradientScrim()),
+        modifier = if (haze == null) Modifier else Modifier
+            .freezeOnExit()
+            .hazeEffect(haze, glassStyle()) { alpha = glass() },
         colors = transparentTopAppBar(),
+        expandedHeight = 60.dp,
         navigationIcon = {
             Image(
                 painterResource(R.drawable.logo_colored),

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.IconButton
 import android.content.ActivityNotFoundException
 import android.widget.Toast
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
@@ -17,7 +18,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -45,6 +45,17 @@ import com.promtuz.chat.ui.components.SearchableHeader
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.GroupedActionRow
 import com.promtuz.chat.ui.components.GroupedScreen
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import com.promtuz.chat.ui.components.Radii
+import com.promtuz.chat.ui.components.RowSubtitleStyle
+import com.promtuz.chat.ui.components.RowTitleStyle
+import com.promtuz.chat.ui.theme.Promtuz
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -80,7 +91,7 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
         }.orEmpty()
     }
 
-    ScreenScaffold(topBar = { scrollBehavior ->
+    ScreenScaffold(containerColor = Promtuz.colors.groupedPage, topBar = { scrollBehavior ->
         SearchableHeader(
             scrollBehavior = scrollBehavior,
             windowInsets = androidx.compose.material3.TopAppBarDefaults.windowInsets,
@@ -99,24 +110,22 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
     }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),
-            contentPadding = padding.listPadding(bottom = 48.dp),
+            contentPadding = padding.listPadding(top = 6.dp, bottom = 48.dp),
             verticalArrangement = Arrangement.Top,
         ) {
             when {
                 catalog == null -> item { LicenseLoading() }
                 catalog?.isFailure == true -> item { LicenseError() }
                 libraries.isEmpty() -> item {
-                    Text("No libraries found", Modifier.padding(vertical = 24.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("No libraries found", Modifier.padding(16.dp), style = RowSubtitleStyle, color = Promtuz.colors.muted)
                 }
                 else -> itemsIndexed(libraries, key = { _, library -> library.id }) { index, library ->
                     GroupedActionRow(
                         library.name, index, libraries.size,
                         onClick = { onLibraryClick(library.id) },
                         supportingText = "${library.version} · ${library.license}",
-                    ) {
-                        MorphIcon(MorphGlyph.Code, null, Modifier.size(26.dp))
-                    }
+                        control = { MorphIcon(MorphGlyph.ChevronRight, null, Modifier.size(18.dp), tint = Promtuz.colors.muted) },
+                    )
                 }
             }
         }
@@ -128,7 +137,7 @@ fun LibraryLicenseScreen(id: String) {
     val library by licenseAsset("licenses/$id.json") { Json.decodeFromString<LibraryLicense>(it) }
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
-    val colors = MaterialTheme.colorScheme
+    val c = Promtuz.colors
     val content = library?.getOrNull()
     val projectUrl = content?.url?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
@@ -147,7 +156,7 @@ fun LibraryLicenseScreen(id: String) {
     ) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),
-            contentPadding = padding.listPadding(bottom = 48.dp),
+            contentPadding = padding.listPadding(top = 6.dp, bottom = 48.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             when {
@@ -156,23 +165,25 @@ fun LibraryLicenseScreen(id: String) {
                 else -> {
                     item {
                         SelectionContainer {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("${content.version} · ${content.license}", style = MaterialTheme.typography.titleMedium)
-                                Text(content.id.removePrefix("crate:"), color = colors.onSurfaceVariant,
-                                    style = MaterialTheme.typography.bodyMedium)
+                            Column(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card)
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text("${content.version} · ${content.license}", style = TextStyle(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.Medium), color = c.text)
+                                Text(source(content.id), style = RowSubtitleStyle.copy(fontFamily = FontFamily.Monospace), color = c.muted)
                             }
                         }
                     }
                     items(content.notices, key = { it.file }) { notice ->
-                        val text by licenseAsset(notice.file) { it }
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            if (content.notices.size > 1) Text(notice.title,
-                                color = colors.primary, style = MaterialTheme.typography.titleSmall)
+                        val text by licenseAsset(notice.file, ::reflow)
+                        Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (content.notices.size > 1) Text(notice.title, style = RowTitleStyle.copy(fontWeight = FontWeight.Medium), color = c.accent)
                             when {
                                 text == null -> LicenseLoading()
                                 text?.isFailure == true -> LicenseError()
                                 else -> SelectionContainer {
-                                    Text(text!!.getOrThrow(), style = MaterialTheme.typography.bodyMedium)
+                                    Text(text!!.getOrThrow(), style = RowSubtitleStyle.copy(lineHeight = 21.sp), color = c.muted)
                                 }
                             }
                         }
@@ -182,6 +193,27 @@ fun LibraryLicenseScreen(id: String) {
         }
     }
 }
+
+// Where the package lives, as people would type it: crates.io/name or the Maven group:artifact.
+private fun source(id: String): String = when {
+    id.startsWith("crate:") -> "crates.io/" + id.removePrefix("crate:").substringBefore(':')
+    else -> id.substringBeforeLast(':')
+}
+
+private val ListItem = Regex("""^(\d+\.|\([a-z0-9]+\)|[-*•])\s""")
+
+// Joins hard-wrapped lines so paragraphs wrap to the screen; blank lines and list items still break.
+private fun reflow(text: String): String = buildString {
+    for (raw in text.lines()) {
+        val line = raw.trim()
+        when {
+            line.isEmpty() -> if (isNotEmpty() && !endsWith("\n\n")) append(if (endsWith("\n")) "\n" else "\n\n")
+            isEmpty() || endsWith("\n") -> append(line)
+            ListItem.containsMatchIn(line) -> append('\n').append(line)
+            else -> append(' ').append(line)
+        }
+    }
+}.trim()
 
 @Composable
 private fun <T> licenseAsset(path: String, decode: (String) -> T): State<Result<T>?> {
@@ -196,11 +228,11 @@ private fun <T> licenseAsset(path: String, decode: (String) -> T): State<Result<
 @Composable
 private fun LicenseLoading() {
     Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+        CircularProgressIndicator(Modifier.size(24.dp), color = Promtuz.colors.accent, strokeWidth = 2.dp)
     }
 }
 
 @Composable
 private fun LicenseError() {
-    Text("Couldn’t load licenses", Modifier.padding(vertical = 24.dp), color = MaterialTheme.colorScheme.error)
+    Text("Couldn’t load licenses", Modifier.padding(16.dp), style = RowSubtitleStyle, color = Promtuz.colors.danger)
 }

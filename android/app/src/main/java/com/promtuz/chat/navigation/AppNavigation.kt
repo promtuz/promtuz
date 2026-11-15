@@ -3,7 +3,7 @@ package com.promtuz.chat.navigation
 import com.promtuz.chat.utils.extensions.fromHex
 import androidx.compose.foundation.background
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.navigation3.runtime.entryProvider
@@ -69,7 +69,8 @@ fun AppNavigation(
             }
             entry<Routes.ContactCard> { key -> ContactCardScreen(key) }
             entry<Routes.MessageRequests> { MessageRequestsScreen() }
-            entry<Routes.PrivacySettings> { PrivacySettingsScreen() }
+            entry<Routes.PrivacySettings> { PrivacySettingsScreen(appViewModel.navigator) }
+            entry<Routes.BlockedPeople> { BlockedPeopleScreen() }
             entry<Routes.ResetLockedChats> { ResetLockedChatsScreen() }
             entry<Routes.ContactInfo> { key -> ContactInfoScreen(key.conversation, key.peer) }
             entry<Routes.PersonInfo> { key -> ContactInfoScreen(null, key.peer, key.name) }
@@ -84,7 +85,6 @@ fun AppNavigation(
                 onShareIdentity = { appViewModel.navigator.push(Routes.ShareIdentity) },
             ) }
             entry<Routes.Storage> { StorageScreen(
-                onOpenBackup = { appViewModel.navigator.push(Routes.BackupRestore) },
                 onOpenChat = { conversation, name -> appViewModel.navigator.push(Routes.StorageChat(conversation, name)) },
             ) }
             entry<Routes.StorageChat> { key -> StorageScreen(
@@ -121,10 +121,13 @@ fun AppNavigation(
                     onSaved = { if (backStack.lastOrNull() == key) backStack.removeLastOrNull() },
                 )
             }
-            entry<Routes.Settings> { SettingsScreen(appViewModel) }
+            entry<Routes.Settings> {
+                SettingsScreen(appViewModel, koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner))
+            }
             entry<Routes.ChatAppearance> { ChatAppearanceScreen() }
             entry<Routes.About> { AboutScreen(
                 onOpenLicenses = { appViewModel.navigator.push(Routes.OpenSourceLicenses) },
+                onOpenHistory = { appViewModel.navigator.push(Routes.ReleaseHistory) },
             ) }
             entry<Routes.Updates> { UpdateScreen() }
             entry<Routes.ReleaseHistory> { ReleaseHistoryScreen() }
@@ -132,7 +135,8 @@ fun AppNavigation(
                 onLibraryClick = { appViewModel.navigator.push(Routes.LibraryLicense(it)) },
             ) }
             entry<Routes.LibraryLicense> { key -> LibraryLicenseScreen(key.id) }
-            entry<Routes.NotificationsSettings> { NotificationsSettingsScreen() }
+            entry<Routes.NotificationsSettings> { NotificationsSettingsScreen(appViewModel.navigator) }
+            entry<Routes.NotificationsKind> { key -> NotificationsKindScreen(key.groups, appViewModel.navigator) }
             entry<Routes.Logs> { LogsScreen() }
             entry<Routes.Relays> { RelaysScreen() }
             entry<Routes.BackupRestore> { BackupRestoreScreen() }

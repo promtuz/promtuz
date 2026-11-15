@@ -185,7 +185,9 @@ class AppVM(
             conversationHex = id.toHex(), name = contact?.name?.ifBlank { c.displayName } ?: c.displayName,
             kind = c.kind.toInt(), peerHex = c.peer?.toHex(), memberCount = c.members.size,
             lastPreview = last?.let { preview(id, it) }, lastMessageId = last?.id,
-            lastDispatchId = last?.dispatchId?.toHex(), lastMediaKind = last?.mediaKind?.toInt() ?: 0,
+            lastDispatchId = last?.dispatchId?.toHex(),
+            // get_messages leaves media_kind unset, so a captionless picture would read as empty.
+            lastMediaKind = last?.let { bridge.getMessageMedia(id, it.dispatchId)?.kind?.toInt() } ?: 0,
             timestampMs = (last?.timestamp ?: c.createdAt).toLong() * 1000,
             status = contact?.status?.toInt() ?: 1, rejectReason = contact?.rejectReason?.toInt(),
             lastOutgoing = last?.outgoing == true, lastDeleted = last?.deleted == true,

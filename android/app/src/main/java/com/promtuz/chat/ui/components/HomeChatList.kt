@@ -1,6 +1,19 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
+import com.promtuz.chat.R
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -79,11 +92,9 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         }
 
         if (requests.isNotEmpty()) item(key = "message-requests") {
-            androidx.compose.material3.ListItem(
-                modifier = Modifier.clickable { appViewModel.navigator.push(com.promtuz.chat.navigation.Routes.MessageRequests) },
-                supportingContent = { Text(requesters(requests), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) },
-                leadingContent = { DrawableIcon(com.promtuz.chat.R.drawable.i_user_add, size = 28.dp) },
-            ) { Text("Message requests") }
+            MessageRequestsRow(requesters(requests), requests.size) {
+                appViewModel.navigator.push(Routes.MessageRequests)
+            }
         }
         itemsIndexed(chats, key = { _, c -> c.conversationHex }) { _, chat ->
             // Presence is per person, so a group shows none; typing is per chat.
@@ -140,5 +151,27 @@ private fun HomeEmpty(modifier: Modifier) {
                 textAlign = TextAlign.Center,
             )
         }
+    }
+}
+
+@Composable
+private fun MessageRequestsRow(names: String, count: Int, onClick: () -> Unit) {
+    val c = Promtuz.colors
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(52.dp).clip(SquircleShape).background(c.cardHigh), contentAlignment = Alignment.Center) {
+            DrawableIcon(R.drawable.i_user_add, size = 24.dp, tint = c.accent)
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("Message requests", style = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium), color = c.text)
+            Text(names, style = TextStyle(fontSize = 14.5.sp, lineHeight = 20.sp), color = c.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Box(
+            Modifier.defaultMinSize(22.dp, 22.dp).clip(RoundedCornerShape(8.dp)).background(c.switchOff).padding(horizontal = 7.dp),
+            contentAlignment = Alignment.Center,
+        ) { Text("$count", style = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium), color = c.text) }
     }
 }

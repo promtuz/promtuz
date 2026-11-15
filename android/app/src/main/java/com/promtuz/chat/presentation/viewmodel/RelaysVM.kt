@@ -21,14 +21,10 @@ data class UiRelay(
     val port: Int,
     val status: RelayStatus,
     val lastLatencyMs: Long?,
-    val windowAttempts: Int,
-    val windowSuccesses: Int,
     val consecutiveFailures: Int,
     val lastConnectMs: Long?,
     val backoffUntilMs: Long?,
     val isConnected: Boolean,
-    /** RTT in ms, oldest first. */
-    val latencySamples: List<Float>,
 ) {
     val canReset get() = status == RelayStatus.PROBING || status == RelayStatus.DOWN
 }
@@ -85,13 +81,10 @@ class RelaysVM : ViewModel() {
             port = port.toInt(),
             status = status,
             lastLatencyMs = lastLatency?.toLong(),
-            windowAttempts = windowAttempts.toInt(),
-            windowSuccesses = windowSuccesses.toInt(),
             consecutiveFailures = consecutiveFailures.toInt(),
             lastConnectMs = lastConnect?.toLong(),
             backoffUntilMs = backoffUntil?.toLong(),
             isConnected = isConnected,
-            latencySamples = latencySamples.map { it.toFloat() },
         )
     }
 

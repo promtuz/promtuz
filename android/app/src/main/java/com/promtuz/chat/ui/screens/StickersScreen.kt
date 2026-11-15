@@ -1,40 +1,26 @@
 package com.promtuz.chat.ui.screens
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.promtuz.chat.R
+import com.promtuz.chat.ui.components.*
+import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.presentation.viewmodel.StickersVM
-import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.MorphGlyph
-import com.promtuz.chat.ui.components.MorphIcon
-import com.promtuz.chat.ui.components.SettingsSection
-import com.promtuz.chat.ui.components.GroupedScreen
-import com.promtuz.chat.ui.components.StickerPackSheet
-import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.utils.media.StickerImage
 import org.koin.androidx.compose.koinViewModel
 
@@ -48,44 +34,42 @@ fun StickersScreen(
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.refresh() }
     var sheet by remember { mutableStateOf<StickerRef?>(null) }
 
+    val c = Promtuz.colors
     GroupedScreen({ Text("Stickers") }) { padding ->
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            contentPadding = padding.listPadding(bottom = 48.dp),
-            verticalArrangement = Arrangement.Top,
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 6.dp, bottom = 24.dp)),
         ) {
-            item {
-                GroupedActionRow("Create a pack", 0, 1, onCreate) {
-                    MorphIcon(MorphGlyph.Plus, null, Modifier.size(26.dp))
+            SettingsCard(header = "Your packs") {
+                SettingsRow(
+                    "Create a pack", titleColor = c.accent,
+                    leading = { DrawableIcon(R.drawable.oi_sticker, size = 24.dp, tint = c.accent) },
+                    onClick = onCreate,
+                )
+                packs.forEach { pack ->
+                    SettingsRow(
+                        pack.name,
+                        subtitle = if (pack.stickers.size == 1) "1 sticker" else "${pack.stickers.size} stickers",
+                        leading = {
+                            Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(c.cardHigh), contentAlignment = Alignment.Center) {
+                                pack.cover?.let { StickerImage(it, null, Modifier.size(32.dp), contentScale = ContentScale.Fit) }
+                            }
+                        },
+                        leadingSize = 44.dp,
+                        trailing = Trailing.Chevron,
+                        onClick = { pack.cover?.let { sheet = it } },
+                    )
                 }
             }
             if (packs.isNotEmpty()) {
-                item { SettingsSection("Your packs", top = 16.dp) }
-                itemsIndexed(packs, key = { _, p -> p.packHex }) { index, pack ->
-                    GroupedActionRow(
-                        pack.name, index, packs.size,
-                        onClick = { pack.cover?.let { sheet = it } },
-                        supportingText = if (pack.stickers.size == 1) "1 sticker" else "${pack.stickers.size} stickers",
-                    ) {
-                        Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
-                            pack.cover?.let { cover ->
-                                StickerImage(cover, null, Modifier.size(26.dp), contentScale = ContentScale.Fit)
-                            }
-                        }
-                    }
-                }
-                item { SettingsSection("Stickers per row") }
-                item {
-                    var columns by remember { mutableIntStateOf(ChatPrefs.stickerColumns) }
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                        (3..6).forEachIndexed { i, n ->
-                            SegmentedButton(
-                                selected = columns == n,
-                                onClick = { columns = n; ChatPrefs.stickerColumns = n },
-                                shape = SegmentedButtonDefaults.itemShape(i, 4),
-                            ) { Text("$n") }
-                        }
-                    }
+                CardGap()
+                var columns by remember { mutableIntStateOf(ChatPrefs.stickerColumns) }
+                SettingsCard(header = "Panel") {
+                    SettingsChoiceRow(
+                        "Stickers per row",
+                        choices = (3..6).map { Choice(it, "$it") },
+                        selected = columns,
+                        onSelect = { columns = it; ChatPrefs.stickerColumns = it },
+                    )
                 }
             }
         }

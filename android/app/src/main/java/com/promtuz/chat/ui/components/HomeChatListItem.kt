@@ -24,8 +24,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -52,6 +50,10 @@ import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.ui.text.parseMessageDate
+import com.promtuz.chat.ui.theme.Promtuz
+import com.promtuz.chat.ui.theme.PromtuzColors
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.withTimeoutOrNull
 import com.promtuz.chat.utils.media.rememberAvatar
 
@@ -76,8 +78,8 @@ fun HomeChatListItem(
     onRequestDecision: (RequestDecision) -> Unit = {},
     privateChat: Boolean = false,
 ) {
-    val type = MaterialTheme.typography
     val colors = MaterialTheme.colorScheme
+    val c = Promtuz.colors
     val haptic = LocalHapticFeedback.current
     val unread = chat.unreadCount > 0
 
@@ -107,7 +109,7 @@ fun HomeChatListItem(
             Modifier
                 .fillMaxWidth()
                 .onGloballyPositioned { rowCoord.c = it }
-                .indication(interaction, ripple())
+                .indication(interaction, PressHighlight)
                 // A quick lift opens the chat, an early drag scrolls the list, and a hold
                 // opens the menu for the same finger to drag to an item.
                 .pointerInput(chat.conversationHex, pinned, muted, unread) {
@@ -163,19 +165,19 @@ fun HomeChatListItem(
                     Text(
                         chat.name,
                         Modifier.weight(1f),
-                        style = type.titleMediumEmphasized,
+                        style = HomeNameStyle,
                         fontWeight = if (unread) FontWeight.Bold else null,
-                        color = colors.onSurface,
+                        color = c.text,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (privateChat) DrawableIcon(
-                        R.drawable.oi_lock_chat_open, size = 14.dp, desc = "Unlocked chat",
-                        tint = colors.onSurfaceVariant.copy(0.7f),
+                        R.drawable.oi_lock_chat_open, size = 15.dp, desc = "Unlocked chat",
+                        tint = c.muted,
                     )
                     if (muted) DrawableIcon(
-                        R.drawable.i_volume_off, size = 14.dp, desc = "Muted",
-                        tint = colors.onSurfaceVariant.copy(0.7f),
+                        R.drawable.i_volume_off, size = 15.dp, desc = "Muted",
+                        tint = c.muted,
                     )
                     if (chat.timestampMs > 0) Row(
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -185,15 +187,15 @@ fun HomeChatListItem(
                             key(chat.conversationHex, chat.lastMessageId) {
                                 MessageStatusIcon(
                                     status = SendStatus.from(chat.lastStatus),
-                                    tint = colors.onSurfaceVariant.copy(0.7f),
-                                    seenTint = colors.primary,
+                                    tint = c.muted,
+                                    seenTint = c.accent,
                                 )
                             }
                         }
                         Text(
                             parseMessageDate(LocalContext.current, chat.timestampMs),
-                            style = type.bodySmallEmphasized,
-                            color = if (unread && !muted) colors.primary else colors.onSurfaceVariant.copy(0.7f),
+                            style = HomeTimeStyle,
+                            color = if (unread && !muted) c.accent else c.muted,
                         )
                     }
                 }
@@ -203,7 +205,7 @@ fun HomeChatListItem(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    val (line, lineColor) = statusLine(chat, typing, colors)
+                    val (line, lineColor) = statusLine(chat, typing, c)
                     if (!typing && chat.status == 1 && !chat.lastDeleted && chat.lastMediaKind in listOf(1, 2, 4)) {
                         chat.lastDispatchId?.let { did ->
                             val preview = rememberMessagePreview(chat.conversationHex, did, retry = chat.lastMediaKind == 4)
@@ -217,16 +219,16 @@ fun HomeChatListItem(
                     Text(
                         line,
                         Modifier.weight(1f),
-                        style = type.bodySmallEmphasized,
+                        style = HomePreviewStyle,
                         color = lineColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (pinned) DrawableIcon(
-                        R.drawable.i_pin, size = 14.dp, desc = "Pinned",
-                        tint = colors.onSurfaceVariant.copy(0.7f),
+                        R.drawable.i_pin, size = 15.dp, desc = "Pinned",
+                        tint = c.muted,
                     )
-                    if (unread) UnreadBadge(chat.unreadCount, muted, colors)
+                    if (unread) UnreadBadge(chat.unreadCount, muted)
                 }
             }
         }
@@ -250,19 +252,22 @@ fun HomeChatListItem(
     }
 }
 
-private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme): Pair<String, Color> = when {
-    typing -> "typing…" to colors.primary
-    chat.status == 0 && chat.lastMessageId == null -> "Waiting to connect…" to colors.primary.copy(0.8f)
-    chat.status == 2 -> declineText(chat.rejectReason) to colors.error.copy(0.85f)
-    chat.lastDeleted -> "deleted message" to colors.onSurfaceVariant.copy(0.6f)
+private val HomeNameStyle = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
+private val HomeTimeStyle = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
+private val HomePreviewStyle = TextStyle(fontSize = 14.5.sp, lineHeight = 20.sp)
+
+private fun statusLine(chat: ChatSummary, typing: Boolean, c: PromtuzColors): Pair<String, Color> = when {
+    typing -> "typing…" to c.accent
+    chat.status == 0 && chat.lastMessageId == null -> "Waiting to connect…" to c.accent
+    chat.status == 2 -> declineText(chat.rejectReason) to c.danger
+    chat.lastDeleted -> "deleted message" to c.muted
     chat.lastPreview.isNullOrEmpty() && chat.lastMediaKind == 0 ->
-        "No messages yet" to colors.onSurfaceVariant.copy(0.6f)
+        "No messages yet" to c.muted
     else -> {
         // A captionless picture or a voice note has no text of its own.
         val preview = chat.lastPreview.orEmpty().ifEmpty { mediaLabel(chat.lastMediaKind) }
         val text = if (chat.lastOutgoing) "You: $preview" else preview
-        val col = if (chat.unreadCount > 0) colors.onSurface.copy(0.9f) else colors.onSurfaceVariant.copy(0.7f)
-        text to col
+        text to c.muted
     }
 }
 
@@ -274,22 +279,22 @@ private fun declineText(reason: Int?): String = when (reason) {
 }
 
 @Composable
-private fun UnreadBadge(count: Int, muted: Boolean, colors: ColorScheme) {
-    val bg = if (muted) colors.surfaceVariant else colors.primary
-    val fg = if (muted) colors.onSurfaceVariant else colors.onPrimary
+private fun UnreadBadge(count: Int, muted: Boolean) {
+    val c = Promtuz.colors
+    val bg = if (muted) c.switchOff else c.accentFill
+    val fg = if (muted) c.text else Color.White
     Box(
         Modifier
-            .heightIn(min = 20.dp)
-            .defaultMinSize(minWidth = 20.dp)
-            .clip(CircleShape)
+            .heightIn(min = 22.dp)
+            .defaultMinSize(minWidth = 22.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(bg)
-            .padding(horizontal = 6.dp),
+            .padding(horizontal = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             if (count > 99) "99+" else "$count",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
+            style = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
             color = fg,
             maxLines = 1,
         )

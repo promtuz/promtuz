@@ -1,90 +1,115 @@
 package com.promtuz.chat.ui.screens
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.activity.compose.LocalActivity
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.promtuz.chat.ui.components.AppAlertDialog
-import com.promtuz.chat.ui.components.GroupedActionRow
-import com.promtuz.chat.ui.components.SettingsSection
-import com.promtuz.chat.ui.components.GroupedScreen
-import com.promtuz.chat.ui.components.listPadding
+import com.promtuz.chat.R
+import com.promtuz.chat.data.ChatPrefs
+import com.promtuz.chat.navigation.AppNavigator
+import com.promtuz.chat.navigation.Routes
+import com.promtuz.chat.security.ScreenSecurity
+import com.promtuz.chat.ui.components.*
+import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.launch
 import uniffi.core.BlockedPerson
 
 @Composable
-fun PrivacySettingsScreen() {
-    val app = org.koin.compose.koinInject<com.promtuz.chat.presentation.viewmodel.AppVM>()
-    val locked by remember {
-        observeQuery(setOf("messages", "conversations", "private_conversations")) {
-            CoreBridge.privateConversationIds()
-        }
-    }.collectAsState(emptyList())
+fun PrivacySettingsScreen(nav: AppNavigator) {
+    val activity = LocalActivity.current
     val scope = rememberCoroutineScope()
     var everyone by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) { everyone = runCatching { CoreBridge.messageRequestsEnabled() }.getOrDefault(true) }
+    val locked by remember {
+        observeQuery(setOf("messages", "conversations", "private_conversations")) { CoreBridge.privateConversationIds() }
+    }.collectAsState(emptyList())
     val blocked by remember { observeQuery(setOf("prefs")) { CoreBridge.blockedPeople() } }.collectAsState(emptyList())
-    var unblocking by remember { mutableStateOf<BlockedPerson?>(null) }
+    var secure by remember { mutableStateOf(ChatPrefs.blockScreenshots) }
 
-    GroupedScreen({ Text("Privacy") }) { padding ->
+    GroupedScreen({ Text("Privacy and security") }) { padding ->
         Column(
-            Modifier.fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(padding.listPadding()),
-            verticalArrangement = Arrangement.Top,
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 6.dp, bottom = 24.dp)),
         ) {
-            SettingsSection("Who can message me")
-            Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.Top) {
-                listOf(true, false).forEachIndexed { index, option ->
-                    GroupedActionRow(
-                        title = if (option) "Everyone" else "My contacts",
-                        supportingText = if (option) "People you haven’t added go to Message requests"
-                                 else "Only people you’ve added can message you",
-                        index = index,
-                        groupSize = 2,
-                        selected = everyone == option,
-                        onClick = {
-                            everyone = option
-                            scope.launch { runCatching { CoreBridge.setMessageRequestsEnabled(option) } }
+            SettingsCard {
+                everyone?.let { current ->
+                    SettingsChoiceRow(
+                        "Who can message me",
+                        choices = listOf(
+                            Choice(true, "Everyone", "People you haven’t added land in Message requests"),
+                            Choice(false, "My contacts", "Only people you’ve added can reach you"),
+                        ),
+                        selected = current,
+                        onSelect = { v ->
+                            everyone = v
+                            scope.launch { runCatching { CoreBridge.setMessageRequestsEnabled(v) } }
                         },
-                        control = { RadioButton(selected = everyone == option, onClick = null) },
+                    )
+                } ?: SettingsRow("Who can message me")
+            }
+            CardGap()
+
+            SettingsCard(header = "Protection") {
+                if (locked.isNotEmpty()) SettingsRow(
+                    "Locked chats",
+                    subtitle = "Reset one if you forgot its code",
+                    icon = R.drawable.oi_lock_chat,
+                    value = locked.size.toString(),
+                    trailing = Trailing.Chevron,
+                    onClick = { nav.push(Routes.ResetLockedChats) },
+                )
+                SettingsSwitchRow(
+                    "Block screenshots", secure,
+                    {
+                        secure = it
+                        ChatPrefs.blockScreenshots = it
+                        activity?.window?.let(ScreenSecurity::apply)
+                    },
+                    subtitle = if (secure) "Promtuz also looks blank in recent apps" else null,
+                    icon = R.drawable.oi_eye_slash,
+                )
+            }
+
+            if (blocked.isNotEmpty()) {
+                CardGap()
+                SettingsCard {
+                    SettingsRow(
+                        "Blocked people",
+                        icon = R.drawable.oi_user_blocked,
+                        value = blocked.size.toString(),
+                        trailing = Trailing.Chevron,
+                        onClick = { nav.push(Routes.BlockedPeople) },
                     )
                 }
             }
-            if (locked.isNotEmpty()) {
-                SettingsSection("Locked chats")
-                GroupedActionRow("Reset a locked chat", 0, 1,
-                    onClick = { app.navigator.push(com.promtuz.chat.navigation.Routes.ResetLockedChats) },
-                    supportingText = "Delete its history if you forgot the code")
-            }
-            if (blocked.isNotEmpty()) {
-                SettingsSection("Blocked")
-                blocked.forEachIndexed { index, person ->
-                    GroupedActionRow(
-                        title = person.name,
-                        index = index,
-                        groupSize = blocked.size,
+        }
+    }
+}
+
+@Composable
+fun BlockedPeopleScreen() {
+    val scope = rememberCoroutineScope()
+    val blocked by remember { observeQuery(setOf("prefs")) { CoreBridge.blockedPeople() } }.collectAsState(emptyList())
+    var unblocking by remember { mutableStateOf<BlockedPerson?>(null) }
+
+    GroupedScreen({ Text("Blocked people") }) { padding ->
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 6.dp, bottom = 24.dp)),
+        ) {
+            if (blocked.isNotEmpty()) SettingsCard(footer = "They can’t message you or send you requests.") {
+                blocked.forEach { person ->
+                    SettingsRow(
+                        person.name,
+                        leading = { Avatar(person.name, size = 40.dp, identityKey = person.ipk.toHex()) },
+                        leadingSize = 40.dp,
+                        value = "Unblock",
+                        valueColor = com.promtuz.chat.ui.theme.Promtuz.colors.accent,
                         onClick = { unblocking = person },
-                        control = { Text("Unblock", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge) },
                     )
                 }
             }

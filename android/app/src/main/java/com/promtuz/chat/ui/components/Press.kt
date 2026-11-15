@@ -1,0 +1,192 @@
+package com.promtuz.chat.ui.components
+
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.util.lerp
+import androidx.compose.foundation.IndicationNodeFactory
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ButtonColors
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.IconButtonColors
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.node.CompositionLocalConsumerModifierNode
+import androidx.compose.ui.node.DelegatableNode
+import androidx.compose.ui.node.DrawModifierNode
+import androidx.compose.ui.node.currentValueOf
+import androidx.compose.ui.node.invalidateDraw
+import androidx.compose.ui.unit.dp
+import com.promtuz.chat.ui.theme.LocalPromtuzColors
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+/**
+ * The app's ripple. Like Telegram's, it spreads from the finger *behind* the content, the way an
+ * Android view's background ripple does, so text and icons stay crisp; Material's paints over them.
+ * It is faint, and a quick tap still finishes its spread before fading.
+ */
+object PressHighlight : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode = PressNode(interactionSource)
+    override fun equals(other: Any?) = other === this
+    override fun hashCode() = 7
+}
+
+// Android's own ripple timing: a 75ms fade-in, a 225ms spread from 30% of the radius, and a
+// 150ms fade-out once released. Only the wave shows; its feathered rim keeps the edge soft.
+private class PressNode(private val source: InteractionSource) :
+    Modifier.Node(), DrawModifierNode, CompositionLocalConsumerModifierNode {
+    private val spread = Animatable(0f)
+    private val alpha = Animatable(0f)
+    private var origin = Offset.Unspecified
+    private var job: Job? = null
+
+    override fun onAttach() {
+        coroutineScope.launch {
+            source.interactions.collect { i ->
+                when (i) {
+                    is PressInteraction.Press -> {
+                        job?.cancel()
+                        origin = i.pressPosition
+                        spread.snapTo(0f)
+                        job = launch {
+                            launch { alpha.animateTo(1f, tween(FADE_IN_MS, easing = LinearEasing)) { invalidateDraw() } }
+                            spread.animateTo(1f, tween(SPREAD_MS, easing = FastOutSlowInEasing)) { invalidateDraw() }
+                        }
+                    }
+                    is PressInteraction.Release, is PressInteraction.Cancel -> {
+                        val pressing = job
+                        job = launch {
+                            pressing?.join()
+                            alpha.animateTo(0f, tween(FADE_OUT_MS, easing = LinearEasing)) { invalidateDraw() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun ContentDrawScope.draw() {
+        val a = alpha.value
+        if (a > 0f && origin.isSpecified) {
+            val c = currentValueOf(LocalPromtuzColors)
+            val tint = c.text.copy(alpha = (if (c.isDark) 0.07f else 0.06f) * a)
+            val far = maxOf(
+                origin.getDistance(), (origin - Offset(size.width, 0f)).getDistance(),
+                (origin - Offset(0f, size.height)).getDistance(), (origin - Offset(size.width, size.height)).getDistance(),
+            )
+            val r = lerp(far * 0.3f, far * 1.15f, spread.value)
+            // A feathered rim, so the wave brightens the row rather than drawing a disc's outline.
+            // Bounded to the pressed control: a row's wave never spills onto its neighbours.
+            clipRect {
+                drawCircle(
+                    Brush.radialGradient(0f to tint, 0.7f to tint, 1f to tint.copy(alpha = 0f), center = origin, radius = r),
+                    r, origin,
+                )
+            }
+        }
+        drawContent()
+    }
+
+    private companion object { const val SPREAD_MS = 225; const val FADE_IN_MS = 75; const val FADE_OUT_MS = 150 }
+}
+
+/** Filled controls dim while held, the way iOS buttons do; nothing is drawn over them. */
+@Composable
+fun Modifier.pressDim(source: InteractionSource, enabled: Boolean = true): Modifier {
+    val pressed by source.collectIsPressedAsState()
+    val alpha by animateFloatAsState(if (pressed && enabled) 0.72f else 1f,
+        tween(if (pressed) 60 else 220), label = "pressDim")
+    return graphicsLayer { this.alpha = alpha }
+}
+
+private val TextButtonShape = RoundedCornerShape(12.dp)
+
+// Material's buttons under the app's names, so every call site gets the app's press feel.
+// Ripples are switched off in PromtuzTheme; these lay PressHighlight or pressDim on instead.
+
+@Composable
+fun TextButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    colors: ButtonColors = ButtonDefaults.textButtonColors(),
+    contentPadding: PaddingValues = ButtonDefaults.TextButtonContentPadding,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    androidx.compose.material3.TextButton(
+        onClick, modifier.clip(TextButtonShape).indication(source, PressHighlight), enabled, TextButtonShape,
+        colors, contentPadding = contentPadding, interactionSource = source, content = content,
+    )
+}
+
+@Composable
+fun Button(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape = RoundedCornerShape(Radii.button),
+    colors: ButtonColors = ButtonDefaults.buttonColors(),
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    androidx.compose.material3.Button(
+        onClick, modifier.pressDim(source, enabled), enabled, shape, colors,
+        contentPadding = contentPadding, interactionSource = source, content = content,
+    )
+}
+
+@Composable
+fun OutlinedButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape = RoundedCornerShape(Radii.button),
+    colors: ButtonColors = ButtonDefaults.outlinedButtonColors(),
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    androidx.compose.material3.OutlinedButton(
+        onClick, modifier.clip(shape).indication(source, PressHighlight), enabled, shape, colors,
+        contentPadding = contentPadding, interactionSource = source, content = content,
+    )
+}
+
+@Composable
+fun IconButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    colors: IconButtonColors = IconButtonDefaults.iconButtonColors(),
+    content: @Composable () -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    androidx.compose.material3.IconButton(
+        onClick, modifier.clip(RoundedCornerShape(Radii.iconButton)).indication(source, PressHighlight),
+        enabled, colors, source, content = content,
+    )
+}

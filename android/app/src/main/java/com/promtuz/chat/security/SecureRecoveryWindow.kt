@@ -17,11 +17,25 @@ internal object SecureRecoveryWindow {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 
+    fun holds(window: Window) = leases.containsKey(window)
+
     fun release(window: Window) {
         val lease = leases[window] ?: return
         if (--lease.count == 0) {
             leases.remove(window)
-            if (!lease.previouslySecure) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            if (!lease.previouslySecure && !ScreenSecurity.blocked) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
+    }
+}
+
+/** "Block screenshots": every Promtuz window is secure, including in the recents preview. */
+object ScreenSecurity {
+    @Volatile var blocked = false
+        private set
+
+    fun apply(window: Window) {
+        blocked = com.promtuz.chat.data.ChatPrefs.blockScreenshots
+        if (blocked) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else if (!SecureRecoveryWindow.holds(window)) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 }

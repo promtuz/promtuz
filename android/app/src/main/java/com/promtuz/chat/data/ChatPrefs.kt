@@ -28,6 +28,54 @@ object ChatPrefs {
             .getOrDefault(NotifBuzz.EveryMessage)
         set(v) = put(NOTIF_BUZZ, v.name)
 
+    var notifChats: Boolean
+        get() = bool("notif_chats", true)
+        set(v) = put("notif_chats", v.toString())
+
+    var notifGroups: Boolean
+        get() = bool("notif_groups", true)
+        set(v) = put("notif_groups", v.toString())
+
+    var notifRequests: Boolean
+        get() = bool("notif_requests", true)
+        set(v) = put("notif_requests", v.toString())
+
+    var inAppBanners: Boolean
+        get() = bool("in_app_banners", true)
+        set(v) = put("in_app_banners", v.toString())
+
+    var inAppSounds: Boolean
+        get() = bool("in_app_sounds", true)
+        set(v) = put("in_app_sounds", v.toString())
+
+    var inAppVibrate: Boolean
+        get() = bool("in_app_vibrate", true)
+        set(v) = put("in_app_vibrate", v.toString())
+
+    var openChatSounds: Boolean
+        get() = bool("open_chat_sounds", false)
+        set(v) = put("open_chat_sounds", v.toString())
+
+    /** The launcher badge counts chats instead of messages. */
+    var badgeChats: Boolean
+        get() = bool("badge_chats", false)
+        set(v) = put("badge_chats", v.toString())
+
+    /** The old single switch becomes the per-kind ones, so turning one kind back on leaves the rest off. */
+    fun foldNotifSwitch() {
+        if (notifEnabled) return
+        notifChats = false; notifGroups = false; notifRequests = false; notifEnabled = true
+    }
+
+    fun resetNotifications() {
+        listOf(NOTIF_ENABLED, NOTIF_PREVIEW, NOTIF_BUZZ, "notif_chats", "notif_groups", "notif_requests",
+            "in_app_banners", "in_app_sounds", "in_app_vibrate", "open_chat_sounds", "badge_chats").forEach { put(it, "") }
+    }
+
+    var blockScreenshots: Boolean
+        get() = bool("block_screenshots", false)
+        set(v) = put("block_screenshots", v.toString())
+
     var stickerColumns: Int
         get() = get(STICKER_COLUMNS)?.toIntOrNull()?.coerceIn(3, 6) ?: 5
         set(v) = put(STICKER_COLUMNS, v.toString())

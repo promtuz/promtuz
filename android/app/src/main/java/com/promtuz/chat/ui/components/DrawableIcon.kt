@@ -35,7 +35,7 @@ fun DrawableIcon(
     @DrawableRes id: Int,
     modifier: Modifier = Modifier,
     desc: String = "",
-    tint: Color = MaterialTheme.colorScheme.onSurface,
+    tint: Color = LocalContentColor.current,
     size: Dp? = null,
     strokeWidth: Float? = null,
 ) {

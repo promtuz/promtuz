@@ -18,7 +18,12 @@ import android.graphics.Shader
 import android.graphics.Typeface
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.RingtoneManager
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.SystemClock
 import android.net.Uri
 import androidx.core.content.FileProvider
@@ -186,18 +191,24 @@ object PushNotifier {
                 .ifBlank { "New message" }
         }
         groupConvs = convs.filter { it.kind.toInt() == 1 }.map { it.id.toHex() }.toSet()
-        mutedConvs = convs.filter { it.muted }.map { it.id.toHex() }.toSet()
+        // A chat whose kind is switched off behaves like a muted one.
+        val chatsOn = ChatPrefs.notifChats
+        val groupsOn = ChatPrefs.notifGroups
+        mutedConvs = convs.filter { it.muted || !(if (it.kind.toInt() == 1) groupsOn else chatsOn) }
+            .map { it.id.toHex() }.toSet()
         rendered.keys.retainAll(counts.keys)
         for (conv in counts.keys) {
             if (!enabled || viewing(conv) || conv in mutedConvs) {
                 val pending = CoreBridge.pendingNotificationIds(conv.fromHex())
-                if (pending.isNotEmpty() && (!enabled || viewing(conv) || conv in mutedConvs)) {
+                if (pending.isNotEmpty()) {
                     CoreBridge.markNotified(pending)
+                    if (enabled && viewing(conv) && conv !in mutedConvs && ChatPrefs.openChatSounds)
+                        feedback(if (conv in groupConvs) AlertKind.Groups else AlertKind.Chats, sound = true, vibrate = false)
                 }
             }
         }
         val requests = convs.filter { it.request && (counts[it.id.toHex()] ?: 0) > 0 }
-        reconcileRequests(enabled, requests)
+        reconcileRequests(enabled && ChatPrefs.notifRequests, requests)
 
         if (!enabled) return
 
@@ -303,16 +314,21 @@ object PushNotifier {
             }
         }
 
-        val chat = NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
+        val kind = if (isGroup) AlertKind.Groups else AlertKind.Chats
+        // In the app, banners use a soundless channel and Promtuz plays the in-app sound itself.
+        val inApp = foreground
+        val banner = inApp && ChatPrefs.inAppBanners
+        val channel = if (banner) Notifications.IN_APP_CHANNEL else Notifications.channel(app, kind)
+        val chat = NotificationCompat.Builder(app, channel)
             .setSmallIcon(R.drawable.i_logo_mono)
             .setColor(BRAND_COLOR)
-            .setNumber(n)
+            .setNumber(if (ChatPrefs.badgeChats) 1 else n)
             // The send time, so a drain after hours offline does not stamp everything with its arrival.
             .setWhen(newest * 1000)
             .setShowWhen(true)
             .setGroup(Notifications.GROUP_KEY)
             .setAutoCancel(true)
-            .setSilent(silent)
+            .setSilent(silent || (inApp && !banner))
             .setContentIntent(openChat(convHex, displayName))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
         if (ChatPrefs.notifPreview) {
@@ -372,6 +388,7 @@ object PushNotifier {
         chat.addAction(readAction)
         if (mode == NotifBuzz.FirstOnly) chat.setOnlyAlertOnce(true)
         nm().notify(notifId(convHex), chat.build())
+        if (inApp && !silent) feedback(kind, ChatPrefs.inAppSounds, ChatPrefs.inAppVibrate)
         rendered[convHex] = snapshot
         // Only disposable, generated previews; never the authoritative media files.
         val keep = images.values.filterNotNull().map { it.lastPathSegment }.toSet()
@@ -382,7 +399,7 @@ object PushNotifier {
 
         nm().notify(
             SUMMARY_ID,
-            NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
+            NotificationCompat.Builder(app, Notifications.channel(app, AlertKind.Chats))
                 .setSmallIcon(R.drawable.i_logo_mono)
                 .setColor(BRAND_COLOR)
                 .setGroup(Notifications.GROUP_KEY)
@@ -394,6 +411,25 @@ object PushNotifier {
     }
 
     private fun nm() = app.getSystemService(NotificationManager::class.java)
+
+    /** The sound and buzz of [kind]'s channel, played by hand while Promtuz is open. */
+    private fun feedback(kind: AlertKind, sound: Boolean, vibrate: Boolean) {
+        val style = Notifications.style(app, kind)
+        val ringer = app.getSystemService(AudioManager::class.java).ringerMode
+        if (sound && ringer == AudioManager.RINGER_MODE_NORMAL) style.soundUri?.let { uri ->
+            runCatching {
+                RingtoneManager.getRingtone(app, uri)?.apply {
+                    audioAttributes = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
+                }?.play()
+            }
+        }
+        if (vibrate && style.vibe != Vibe.Off && ringer != AudioManager.RINGER_MODE_SILENT) {
+            val pattern = style.vibe.pattern ?: longArrayOf(0, 180)
+            app.getSystemService(Vibrator::class.java)?.vibrate(VibrationEffect.createWaveform(pattern, -1))
+        }
+    }
 
     private fun prunePreviewFiles(conversations: Set<String>) {
         File(app.cacheDir, "notification-previews").listFiles()?.filter {

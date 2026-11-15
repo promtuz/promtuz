@@ -47,9 +47,9 @@ fun HomeSearchBar(
     val colors = MaterialTheme.colorScheme
     Box(
         modifier = Modifier
-            .padding(10.dp, 8.dp)
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp)
             .fillMaxWidth()
-            .height(44.dp)
+            .height(48.dp)
             .onGloballyPositioned {
                 bounds.value = Rect(it.positionInRoot(), it.size.toSize())
             }
@@ -71,8 +71,8 @@ fun HomeSearchBar(
                     onClick()
                 },
             ))
-            .clip(RoundedCornerShape(28.dp))
-            .background(colors.surfaceContainerHigh),
+            .clip(RoundedCornerShape(Radii.field))
+            .background(colors.surfaceContainerLow),
     ) {
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(44.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {

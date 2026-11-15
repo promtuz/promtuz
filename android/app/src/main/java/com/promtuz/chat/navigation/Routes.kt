@@ -57,6 +57,9 @@ object Routes : NavKey {
     data object ResetLockedChats : NavKey
 
     @Serializable
+    data object BlockedPeople : NavKey
+
+    @Serializable
     data class ContactInfo(val conversation: String, val peer: String) : NavKey
 
     @Serializable
@@ -99,6 +102,9 @@ object Routes : NavKey {
 
     @Serializable
     data object NotificationsSettings : NavKey
+
+    @Serializable
+    data class NotificationsKind(val groups: Boolean) : NavKey
 
     @Serializable
     data object Logs : NavKey

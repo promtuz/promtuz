@@ -1,5 +1,7 @@
 package com.promtuz.chat
 
+import com.promtuz.chat.ui.components.TextButton
+import com.promtuz.chat.ui.components.IconButton
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
@@ -44,6 +46,7 @@ class ShareActivity : ComponentActivity() {
     private val model: IncomingShareVM by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.promtuz.chat.security.ScreenSecurity.apply(window)
         enableEdgeToEdge()
         model.receive(intent)
         setContent {

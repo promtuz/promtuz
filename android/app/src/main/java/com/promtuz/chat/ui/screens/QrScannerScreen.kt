@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.IconButton
+import com.promtuz.chat.ui.components.Button
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -25,10 +27,8 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults

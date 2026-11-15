@@ -23,7 +23,7 @@ internal data class StorageUsage(val entries: List<StorageEntry>, val free: Long
 /** Attachments in cache are owned by core and may still be referenced by messages. */
 internal data class StorageMediaItem(
     val conversation: String, val dispatch: String, val chat: String, val kind: Int,
-    val name: String, val caption: String, val timestamp: Long, val bytes: Long,
+    val name: String, val caption: String, val timestamp: Long, val bytes: Long, val avatar: String = conversation,
 ) { val key get() = "$conversation:$dispatch" }
 
 internal interface StorageSource {
@@ -47,11 +47,18 @@ internal class StorageRepository(context: Context) : StorageSource {
         com.promtuz.core.CoreBridge.storagePreview(item.conversation.fromHex(), item.dispatch.fromHex())
 
     override suspend fun media(): List<StorageMediaItem> {
-        val names = com.promtuz.core.CoreBridge.listConversations().associate { it.id.toHex() to it.displayName }
+        val contacts = com.promtuz.core.CoreBridge.contacts().associate { it.ipk.toHex() to it.name }
+        // A 1:1 is named and coloured after its person, the way the chat list shows it.
+        val chats = com.promtuz.core.CoreBridge.listConversations().associate { c ->
+            val id = c.id.toHex()
+            val peer = c.peer?.toHex()?.takeIf { c.kind.toInt() != 1 }
+            id to ((peer?.let { contacts[it] } ?: c.displayName).ifBlank { "Chat" } to (peer ?: "group:$id"))
+        }
         return com.promtuz.core.CoreBridge.storageMedia().map { item ->
             val conversation = item.conversationId.toHex()
-            StorageMediaItem(conversation, item.dispatchId.toHex(), names[conversation] ?: "Chat",
-                item.kind.toInt(), item.name, item.caption, item.timestamp.toLong(), item.localBytes.toLong())
+            val (name, avatar) = chats[conversation] ?: ("Chat" to conversation)
+            StorageMediaItem(conversation, item.dispatchId.toHex(), name, item.kind.toInt(), item.name,
+                item.caption, item.timestamp.toLong(), item.localBytes.toLong(), avatar)
         }
     }
 

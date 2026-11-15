@@ -8,10 +8,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -22,50 +22,12 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.draw.clip
 import com.promtuz.chat.update.ReleaseNote
-import com.promtuz.chat.update.InstalledChanges
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
-
-/** "What's new": every release after the installed build up to [offered], newest first. */
-fun LazyListScope.releaseNotes(
-    notes: List<ReleaseNote>, offered: String, heading: String = "What's new",
-    subtitle: String? = null, combined: Boolean = false, separator: Boolean = false,
-) {
-    if (notes.isEmpty()) return
-    item("notes") {
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            if (separator) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(heading, style = MaterialTheme.typography.titleLarge)
-                subtitle?.let { Text(it, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            }
-            if (combined) NotesBody(combineNotes(notes))
-            else notes.forEach { ReleaseNoteCard(it, current = it.version == offered) }
-        }
-    }
-}
-
-fun LazyListScope.installedReleaseNotes(changes: InstalledChanges) {
-    if (changes.notes.isEmpty()) return
-    item("installed-notes") {
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(if (changes.previousVersion == null) "What's new in this version" else "Changes since your last update",
-                    style = MaterialTheme.typography.titleLarge)
-                val range = if (changes.previousVersion == changes.version && changes.previousCode != null)
-                    "${changes.version} · Build ${changes.previousCode} → ${changes.code}"
-                else changes.previousVersion?.let { "$it → ${changes.version}" } ?: changes.version
-                Text(range,
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            NotesBody(combineNotes(changes.notes))
-        }
-    }
-}
 
 /** Preserve authored copy, fold shared headings, and remove exact repeats across releases. */
 private fun combineNotes(notes: List<ReleaseNote>): String {
@@ -90,43 +52,47 @@ fun LazyListScope.releaseHistory(notes: List<ReleaseNote>, currentCode: Long) {
 
 @Composable
 private fun ReleaseNoteCard(note: ReleaseNote, current: Boolean, showBuild: Boolean = false) {
-    val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth()) {
+    val c = com.promtuz.chat.ui.theme.Promtuz.colors
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
                 note.version,
                 Modifier
-                    .background(if (current) colors.primaryContainer else colors.surfaceContainerHigh, RoundedCornerShape(8.dp))
+                    .background(if (current) c.accent.copy(alpha = 0.16f) else c.cardHigh, RoundedCornerShape(8.dp))
                     .padding(10.dp, 4.dp),
-                style = MaterialTheme.typography.labelLarge,
-                color = if (current) colors.onPrimaryContainer else colors.onSurface,
+                style = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
+                color = if (current) c.accent else c.text,
             )
             val detail = listOfNotNull(niceDate(note.date).takeIf { it.isNotBlank() },
-                "Build ${note.code}".takeIf { showBuild }).joinToString(" · ")
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                "Build ${note.code}".takeIf { showBuild }, "Installed".takeIf { current }).joinToString(" · ")
+            Text(detail, style = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted)
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
         NotesBody(note.body)
     }
 }
 
+/** An offered update's notes, folded into one list. */
+@Composable
+fun UpdateNotes(notes: List<ReleaseNote>) = NotesBody(combineNotes(notes))
+
 /** Headings, bullets, paragraphs and `**bold**`; enough for release notes. */
 @Composable
 private fun NotesBody(markdown: String) {
-    val body = MaterialTheme.typography.bodyMedium
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    val c = com.promtuz.chat.ui.theme.Promtuz.colors
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (line in markdown.lines().map { it.trim() }.filter { it.isNotEmpty() }) {
             when {
                 line.startsWith("#") -> Text(
                     line.trimStart('#').trim(),
                     Modifier.padding(top = 6.dp),
-                    style = MaterialTheme.typography.titleMedium,
+                    style = RowTitleStyle.copy(fontWeight = FontWeight.Medium), color = c.text,
                 )
                 line.startsWith("- ") || line.startsWith("* ") -> Row {
-                    Text("•", Modifier.padding(end = 8.dp), style = body)
-                    Text(inline(line.drop(2)), style = body)
+                    Box(Modifier.padding(top = 8.dp, end = 12.dp).size(5.dp).background(c.muted, androidx.compose.foundation.shape.CircleShape))
+                    Text(inline(line.drop(2)), style = RowValueStyle, color = c.text)
                 }
-                else -> Text(inline(line), style = body)
+                else -> Text(inline(line), style = RowValueStyle, color = c.text)
             }
         }
     }
@@ -145,5 +111,7 @@ private fun inline(text: String): AnnotatedString = buildAnnotatedString {
 }
 
 private fun niceDate(date: String): String = runCatching {
-    LocalDate.parse(date).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM))
+    val day = LocalDate.parse(date)
+    if (day.year == LocalDate.now().year) day.format(DateTimeFormatter.ofPattern("MMM d"))
+    else day.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM))
 }.getOrDefault(date)

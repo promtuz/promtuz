@@ -10,7 +10,6 @@ internal class ReleaseNotesStore(context: Context, val code: Long, val version: 
     private val directory = File(context.noBackupFilesDir, "release-notes").apply { mkdirs() }
     val channelChanged: Boolean
     val previousCode: Long?
-    val previousVersion: String?
 
     init {
         val oldCode = prefs.getLong("code", -1)
@@ -25,7 +24,6 @@ internal class ReleaseNotesStore(context: Context, val code: Long, val version: 
                 .commit()
         }
         previousCode = prefs.getLong("previous_code", -1).takeIf { it >= 0 }
-        previousVersion = prefs.getString("previous_version", null)
     }
 
     @Synchronized
@@ -50,8 +48,3 @@ internal class ReleaseNotesStore(context: Context, val code: Long, val version: 
             ?.removeSuffix(".md")?.toLongOrNull()?.let { read(channel, it) }
     }.sortedByDescending { it.code }
 }
-
-data class InstalledChanges(
-    val previousVersion: String?, val version: String, val previousCode: Long?, val code: Long,
-    val notes: List<ReleaseNote>,
-)

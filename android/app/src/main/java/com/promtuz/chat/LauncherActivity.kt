@@ -68,6 +68,7 @@ class LauncherActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        com.promtuz.chat.security.ScreenSecurity.apply(window)
         PrivateChatSession.resumed(getSystemService(PowerManager::class.java).isInteractive)
         enforcePrivateExit()
     }

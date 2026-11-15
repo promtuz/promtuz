@@ -1,6 +1,13 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Modifier
+import com.promtuz.chat.ui.theme.Promtuz
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -33,12 +40,18 @@ fun HomeScreen(
             }
         }
     }
+    val haze = rememberHazeState()
+    val scrolled by animateFloatAsState(if (listState.canScrollBackward) 1f else 0f, label = "homeBarGlass")
+    val page = Promtuz.colors.page
     Box {
         Scaffold(
-            topBar = { HomeTopBar(appViewModel, showSearch = searchHidden) },
-            floatingActionButton = { HomeFab(appViewModel) }
+            topBar = { HomeTopBar(appViewModel, showSearch = searchHidden, haze = haze, glass = { scrolled }) },
+            floatingActionButton = { HomeFab(appViewModel) },
+            containerColor = page,
         ) { innerPadding ->
-            HomeChatList(innerPadding, appViewModel, menuState, listState)
+            Box(Modifier.fillMaxSize().background(page).hazeSource(haze)) {
+                HomeChatList(innerPadding, appViewModel, menuState, listState)
+            }
         }
         HomeContextMenu(menuState)
     }

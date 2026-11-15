@@ -2,7 +2,6 @@ package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
 import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.security.RecoveryStore
@@ -19,201 +18,93 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-enum class BackupLogLevel { STEP, INFO, OK, WARN, ERR }
-
-data class BackupLogLine(val id: Long, val level: BackupLogLevel, val text: String)
+sealed interface BackupOutcome {
+    data class Restored(val contacts: Int, val chats: Int, val messages: Int, val unreachable: Boolean) : BackupOutcome
+    data class Failed(val title: String, val text: String) : BackupOutcome
+}
 
 /** Restore only merges: the blob's owner holds its key and can edit its plaintext, so it never
  *  outranks a live row. */
 class BackupRestoreVM(private val application: Application) : ViewModel() {
 
-    private val _console = MutableStateFlow<List<BackupLogLine>>(emptyList())
-    val console: StateFlow<List<BackupLogLine>> = _console.asStateFlow()
+    private val _lastBackup = MutableStateFlow(lastModified())
+    val lastBackup: StateFlow<Long?> = _lastBackup.asStateFlow()
+
+    private val _bytes = MutableStateFlow(blobFile().length())
+    val bytes: StateFlow<Long> = _bytes.asStateFlow()
 
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
-    private var nextId = 0L
+    private val _outcome = MutableStateFlow<BackupOutcome?>(null)
+    val outcome: StateFlow<BackupOutcome?> = _outcome.asStateFlow()
 
-    init {
-        line(BackupLogLevel.INFO, "Ready. Blob path: ${blobFile().absolutePath}")
-        describeExistingBlob()
-    }
+    fun dismissOutcome() { _outcome.value = null }
 
     fun suggestedFileName(): String =
         "promtuz-backup-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ENGLISH).format(Date())}.pzbk"
 
-    fun clearConsole() {
-        _console.value = emptyList()
-        line(BackupLogLevel.INFO, "Console cleared.")
-    }
-
-    /** Writes the same file BackupWorker maintains, so this exercises the real pipeline. */
-    fun snapshot() = run("Snapshot") {
-        val target = blobFile()
-        line(BackupLogLevel.INFO, "Target: ${target.absolutePath}")
-        line(
-            BackupLogLevel.INFO,
-            if (target.exists()) "Existing blob: ${target.length()} bytes (will be replaced)"
-            else "Existing blob: none",
-        )
-
-        line(BackupLogLevel.STEP, "Calling core backup_export()…")
+    /** Writes the same file BackupWorker maintains. */
+    fun snapshot() = run(BackupOutcome.Failed("Couldn't back up", "Try again in a moment.")) {
         val blob = CoreBridge.backupExport()
-        line(BackupLogLevel.OK, "Core returned ${blob.size} bytes")
-        describeHeader(blob)
-
         withContext(Dispatchers.IO) {
+            val target = blobFile()
             target.parentFile?.mkdirs()
             // Atomic swap, so a crash mid-write never leaves a half-written blob.
             val tmp = File(target.parentFile, "${target.name}.tmp")
             tmp.writeBytes(blob)
             if (!tmp.renameTo(target)) {
                 tmp.delete()
-                error("atomic rename failed — blob left untouched")
+                error("atomic rename failed")
             }
         }
-        line(BackupLogLevel.OK, "Wrote ${blob.size} bytes (tmp → atomic rename)")
-        line(BackupLogLevel.INFO, "Use \"Save a copy\" to export this file off-device.")
+        _lastBackup.value = lastModified()
+        _bytes.value = blobFile().length()
     }
 
-    fun saveCopyTo(uri: Uri) = run("Save a copy") {
-        val source = blobFile()
-        if (!source.exists()) {
-            line(BackupLogLevel.ERR, "No blob at ${source.absolutePath} — take a snapshot first.")
-            return@run
-        }
-        val bytes = withContext(Dispatchers.IO) { source.readBytes() }
-        line(BackupLogLevel.INFO, "Read ${bytes.size} bytes from the app's copy")
+    fun saveCopyTo(uri: Uri) = run(BackupOutcome.Failed("Couldn't save the copy", "Choose another place and try again.")) {
         withContext(Dispatchers.IO) {
+            val bytes = blobFile().readBytes()
             application.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
-                ?: error("could not open the chosen destination for writing")
+                ?: error("could not open the destination")
         }
-        line(BackupLogLevel.OK, "Copied ${bytes.size} bytes to ${displayName(uri)}")
     }
 
     /** A blob from another identity fails authentication rather than importing garbage. */
-    fun restoreFrom(uri: Uri) = run("Restore") {
-        line(BackupLogLevel.INFO, "Source: ${displayName(uri)}")
+    fun restoreFrom(uri: Uri) = run(BackupOutcome.Failed(
+        "Couldn't restore", "This file isn't a Promtuz backup, or it belongs to another identity.",
+    )) {
         val blob = withContext(Dispatchers.IO) {
             application.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: error("could not open the chosen file for reading")
+                ?: error("could not open the file")
         }
-        line(BackupLogLevel.OK, "Read ${blob.size} bytes")
-        describeHeader(blob)
-
-        line(BackupLogLevel.STEP, "Calling core backup_import_merge()…")
-        line(BackupLogLevel.INFO, "Decrypting under HKDF(isk, \"promtuz-backup-v1\")…")
         val r = CoreBridge.backupImportMerge(blob)
-
-        line(BackupLogLevel.OK, "Authenticated and decompressed. Payload:")
-        line(
-            BackupLogLevel.INFO,
-            "  contacts   ${r.contactsAdded} added / ${r.contactsInBlob} in blob" +
-                skipped(r.contactsInBlob, r.contactsAdded),
+        _outcome.value = BackupOutcome.Restored(
+            contacts = r.contactsAdded.toInt(),
+            chats = r.conversationsAdded.toInt(),
+            messages = r.messagesAdded.toInt(),
+            // Messages name a chat; old blobs without chats restore into nothing.
+            unreachable = r.messagesInBlob > 0u && r.conversationsInBlob == 0u,
         )
-        line(
-            BackupLogLevel.INFO,
-            "  chats      ${r.conversationsAdded} added / ${r.conversationsInBlob} in blob" +
-                skipped(r.conversationsInBlob, r.conversationsAdded),
-        )
-        line(
-            BackupLogLevel.INFO,
-            "  messages   ${r.messagesAdded} added / ${r.messagesInBlob} in blob" +
-                skipped(r.messagesInBlob, r.messagesAdded),
-        )
-        line(
-            BackupLogLevel.INFO,
-            "  reactions  ${r.reactionsAdded} added / ${r.reactionsInBlob} in blob" +
-                skipped(r.reactionsInBlob, r.reactionsAdded),
-        )
-        line(
-            BackupLogLevel.INFO,
-            "  media      ${r.mediaAdded} added / ${r.mediaInBlob} in blob" +
-                skipped(r.mediaInBlob, r.mediaAdded),
-        )
-        // Messages name a chat; without the chats they restore into nothing.
-        if (r.messagesInBlob > 0u && r.conversationsInBlob == 0u) {
-            line(
-                BackupLogLevel.WARN,
-                "This blob carries messages but no chats — written before the backup " +
-                    "format learned to include them. Its history cannot be reached.",
-            )
-        }
-        if (r.backupName != r.currentName) {
-            line(
-                BackupLogLevel.WARN,
-                "Display name in blob is \"${r.backupName}\", live is \"${r.currentName}\" — " +
-                    "left as-is (a merge never renames).",
-            )
-        } else {
-            line(BackupLogLevel.INFO, "Display name matches (\"${r.currentName}\").")
-        }
-        line(BackupLogLevel.OK, "Merge complete. No existing row was modified or deleted.")
-        line(
-            BackupLogLevel.WARN,
-            "Not carried by this format: attachments/images, read state, MLS group state.",
-        )
-    }
-
-    private fun skipped(inBlob: UInt, added: UInt): String {
-        val n = inBlob.toLong() - added.toLong()
-        return if (n > 0) "  ($n already present, kept)" else ""
     }
 
     private fun blobFile() = RecoveryStore.blobFile(application)
 
-    private fun describeExistingBlob() {
-        val f = blobFile()
-        if (!f.exists()) {
-            line(BackupLogLevel.WARN, "No blob on disk yet — take a snapshot to create one.")
-            return
-        }
-        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ENGLISH).format(Date(f.lastModified()))
-        line(BackupLogLevel.INFO, "On disk: ${f.length()} bytes, modified $stamp")
-    }
+    private fun lastModified(): Long? = blobFile().takeIf { it.exists() }?.lastModified()
 
-    private fun describeHeader(blob: ByteArray) {
-        if (blob.size < 5) {
-            line(BackupLogLevel.ERR, "Too short to be a backup blob (${blob.size} bytes)")
-            return
-        }
-        val magic = String(blob, 0, 4, Charsets.US_ASCII)
-        if (magic != "PZBK") {
-            line(BackupLogLevel.ERR, "Bad magic \"$magic\" — expected PZBK. Not a backup file.")
-            return
-        }
-        line(BackupLogLevel.INFO, "Header: magic PZBK, version ${blob[4].toInt()}, 24-byte nonce")
-    }
-
-    private fun displayName(uri: Uri): String = runCatching {
-        application.contentResolver.query(uri, null, null, null, null)?.use { c ->
-            val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (i >= 0 && c.moveToFirst()) c.getString(i) else null
-        }
-    }.getOrNull() ?: uri.lastPathSegment ?: uri.toString()
-
-    private fun run(label: String, block: suspend () -> Unit) {
-        if (_busy.value) {
-            line(BackupLogLevel.WARN, "Busy — $label ignored.")
-            return
-        }
+    private fun run(failure: BackupOutcome.Failed, block: suspend () -> Unit) {
+        if (_busy.value) return
         _busy.value = true
         viewModelScope.launch {
-            line(BackupLogLevel.STEP, "── $label ──")
             try {
                 block()
             } catch (e: Exception) {
-                Timber.tag(TAG).w(e, "%s failed", label)
-                line(BackupLogLevel.ERR, "$label failed: ${e.message ?: e::class.simpleName}")
+                Timber.tag(TAG).w(e, "%s", failure.title)
+                _outcome.value = failure
             } finally {
                 _busy.value = false
             }
         }
-    }
-
-    private fun line(level: BackupLogLevel, text: String) {
-        _console.value += BackupLogLine(nextId++, level, text)
     }
 
     private companion object {

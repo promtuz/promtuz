@@ -1,176 +1,85 @@
 package com.promtuz.chat.ui.screens
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.promtuz.chat.ui.components.listPadding
+import androidx.compose.ui.unit.sp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.RelayStatus
 import com.promtuz.chat.presentation.viewmodel.RelaysVM
 import com.promtuz.chat.presentation.viewmodel.UiRelay
-import com.promtuz.chat.ui.components.AppDropMenu
-import com.promtuz.chat.ui.components.DrawableIcon
-import com.promtuz.chat.ui.components.MenuAction
-import com.promtuz.chat.ui.components.GroupedScreen
+import com.promtuz.chat.ui.components.*
+import com.promtuz.chat.ui.theme.Promtuz
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
 fun RelaysScreen(viewModel: RelaysVM = koinViewModel()) {
     val relays by viewModel.relays.collectAsState()
 
-    GroupedScreen({ Text("Relay Nodes") }) { padding ->
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            contentPadding = padding.listPadding(16.dp, 8.dp, 40.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+    GroupedScreen({ Text("Relays") }) { padding ->
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 6.dp, bottom = 24.dp)),
         ) {
-            item { RelaySummary(relays) }
-            items(relays, key = { it.id }) { relay ->
-                RelayCard(
-                    relay,
-                    onConnect = { viewModel.connect(relay.id) },
-                    onReset = { viewModel.resetCircuit(relay.id) },
-                    onForget = { viewModel.forget(relay.id) }
-                )
-            }
-            if (relays.isEmpty()) {
-                item {
-                    Text(
-                        "No relays stored yet.",
-                        Modifier.padding(top = 24.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyLarge
-                    )
+            StatusCard(relays)
+            if (relays.isNotEmpty()) {
+                CardGap()
+                SettingsCard(header = "Your relays", footer = "Tap a relay to reconnect or forget it.") {
+                    relays.forEach { relay ->
+                        // Two relays on one host are told apart by port; otherwise the port is noise.
+                        val shared = relays.count { it.host == relay.host } > 1
+                        RelayRow(
+                            relay, shared,
+                            onConnect = { viewModel.connect(relay.id) },
+                            onReset = { viewModel.resetCircuit(relay.id) },
+                            onForget = { viewModel.forget(relay.id) },
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+/** How reachable the network is, in words; any one relay is enough. */
 @Composable
-private fun RelaySummary(relays: List<UiRelay>) {
-    val connected = relays.count { it.isConnected }
-    Text(
-        "${relays.size} relays · $connected connected",
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        style = MaterialTheme.typography.labelLarge
-    )
-}
-
-@Composable
-private fun RelayCard(
-    relay: UiRelay, onConnect: () -> Unit, onReset: () -> Unit, onForget: () -> Unit
-) {
-    val colors = MaterialTheme.colorScheme
-    val accent = statusColor(relay.status, colors)
-
+private fun StatusCard(relays: List<UiRelay>) {
+    val c = Promtuz.colors
+    val up = relays.count { it.isConnected }
+    val (title, body, dot) = when {
+        relays.isEmpty() -> Triple("No relays yet", "Promtuz finds relays when it connects to the network.", c.muted)
+        up == 0 -> Triple("Not connected", "No relay is reachable right now. Messages wait on this phone until one is.", c.danger)
+        up == relays.size && up == 1 -> Triple("Connected", "Your relay is reachable.", c.success)
+        up == relays.size -> Triple("Connected", "All $up relays are reachable.", c.success)
+        else -> Triple("Connected", "$up of ${relays.size} relays are reachable. One is enough to send and receive messages.", c.success)
+    }
     Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(colors.surfaceContainerLow)
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "${relay.host}:${relay.port}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = colors.onSurface
-                )
-                Text(
-                    relay.id.take(12),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = colors.onSurfaceVariant
-                )
-            }
-            StatusBadge(relay.status, accent)
-            RelayMenu(relay, onConnect, onReset, onForget)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.size(10.dp).clip(RoundedCornerShape(3.dp)).background(dot))
+            Text(title, style = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.Medium), color = c.text)
         }
-
-        Row(verticalAlignment = Alignment.Bottom) {
-            PingLabel(relay.lastLatencyMs)
-            Spacer(Modifier.weight(1f))
-            Text(
-                successRate(relay),
-                style = MaterialTheme.typography.labelMedium,
-                color = colors.onSurfaceVariant
-            )
-        }
-
-        LatencyGraph(
-            relay.latencySamples,
-            accent,
-            Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-        )
-
-        Text(
-            metaLine(relay),
-            style = MaterialTheme.typography.labelSmall,
-            color = colors.onSurfaceVariant
-        )
+        Text(body, style = RowSubtitleStyle, color = c.muted)
     }
 }
 
 @Composable
-private fun StatusBadge(status: RelayStatus, accent: Color) {
-    val label = when (status) {
-        RelayStatus.LIVE -> "LIVE"
-        RelayStatus.IDLE -> "IDLE"
-        RelayStatus.PROBING -> "PROBING"
-        RelayStatus.DOWN -> "DOWN"
-    }
-    Text(
-        label,
-        Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(accent.copy(alpha = 0.16f))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.Bold,
-        color = accent
-    )
-}
-
-@Composable
-private fun RelayMenu(
-    relay: UiRelay, onConnect: () -> Unit, onReset: () -> Unit, onForget: () -> Unit
-) {
+private fun RelayRow(relay: UiRelay, showPort: Boolean, onConnect: () -> Unit, onReset: () -> Unit, onForget: () -> Unit) {
+    val c = Promtuz.colors
     val connect by rememberUpdatedState(onConnect)
     val reset by rememberUpdatedState(onReset)
     val forget by rememberUpdatedState(onForget)
@@ -178,125 +87,79 @@ private fun RelayMenu(
         listOf(
             buildList {
                 add(MenuAction(if (relay.isConnected) "Reconnect" else "Connect") { connect() })
-                if (relay.canReset) add(MenuAction("Reset circuit") { reset() })
+                if (relay.canReset) add(MenuAction("Try again now") { reset() })
             },
             listOf(MenuAction("Forget relay", destructive = true) { forget() }),
         )
     }
+    val tile = 40.dp
     AppDropMenu(
+        modifier = Modifier.cardRow(16.dp + tile + 14.dp),
         anchor = {
-            DrawableIcon(
-                R.drawable.i_more_vert,
-                Modifier.padding(4.dp),
-                desc = "Actions",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(tile)) {
+                    Box(
+                        Modifier.matchParentSize().clip(RoundedCornerShape(12.dp)).background(c.cardHigh),
+                        contentAlignment = Alignment.Center,
+                    ) { DrawableIcon(R.drawable.i_network_nodes, size = 22.dp, tint = c.muted) }
+                    // The status mark sits on the tile's corner, ringed in the card colour.
+                    Box(
+                        Modifier.align(Alignment.BottomEnd).offset(3.dp, 3.dp).size(14.dp)
+                            .clip(RoundedCornerShape(5.dp)).background(c.card).padding(2.dp)
+                            .clip(RoundedCornerShape(3.dp)).background(statusColor(relay.status)),
+                    )
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(displayHost(relay, showPort), style = RowTitleStyle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        statusLine(relay), style = RowSubtitleStyle,
+                        color = if (relay.status == RelayStatus.DOWN) c.danger else c.muted,
+                    )
+                }
+            }
         },
         groups = groups,
+        onLongClickLabel = "Relay options",
     )
 }
 
-@Composable
-private fun PingLabel(latencyMs: Long?) {
-    val text = latencyMs?.let { "$it ms" } ?: "—"
-    Text(
-        text,
-        style = MaterialTheme.typography.headlineSmall,
-        fontWeight = FontWeight.SemiBold,
-        color = pingColor(latencyMs)
-    )
+private fun displayHost(relay: UiRelay, showPort: Boolean): String {
+    val host = relay.host.removePrefix("::ffff:")
+    return if (showPort) "$host:${relay.port}" else host
 }
 
-@Composable
-private fun LatencyGraph(samples: List<Float>, color: Color, modifier: Modifier) {
-    Canvas(modifier) {
-        if (samples.isEmpty()) return@Canvas
-
-        val pad = 6.dp.toPx()
-        val usableH = (size.height - pad * 2).coerceAtLeast(1f)
-        val maxV = samples.max()
-        val minV = samples.min()
-        val range = (maxV - minV).coerceAtLeast(1f)
-
-        if (samples.size == 1) {
-            drawCircle(color, radius = 2.5.dp.toPx(), center = Offset(size.width / 2, size.height / 2))
-            return@Canvas
-        }
-
-        val dx = size.width / (samples.size - 1)
-        val points = samples.mapIndexed { i, v ->
-            Offset(i * dx, pad + usableH * (1f - (v - minV) / range))
-        }
-
-        val line = Path().apply {
-            moveTo(points[0].x, points[0].y)
-            for (i in 1 until points.size) {
-                val prev = points[i - 1]
-                val cur = points[i]
-                val midX = (prev.x + cur.x) / 2f
-                cubicTo(midX, prev.y, midX, cur.y, cur.x, cur.y)
-            }
-        }
-
-        val fill = Path().apply {
-            addPath(line)
-            lineTo(points.last().x, size.height)
-            lineTo(points.first().x, size.height)
-            close()
-        }
-        drawPath(fill, Brush.verticalGradient(listOf(color.copy(alpha = 0.22f), color.copy(alpha = 0f))))
-        drawPath(
-            line,
-            color,
-            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-        )
-        points.forEach { drawCircle(color, radius = 1.6.dp.toPx(), center = it) }
-    }
-}
-
-private fun statusColor(status: RelayStatus, colors: androidx.compose.material3.ColorScheme): Color =
-    when (status) {
-        RelayStatus.LIVE -> Color(0xFF4CAF50)
-        RelayStatus.IDLE -> colors.onSurfaceVariant
-        RelayStatus.PROBING -> Color(0xFFFFA726)
-        RelayStatus.DOWN -> colors.error
-    }
-
-private fun pingColor(latencyMs: Long?): Color = when {
-    latencyMs == null -> Color(0xFF9E9E9E)
-    latencyMs < 80 -> Color(0xFF4CAF50)
-    latencyMs < 200 -> Color(0xFFFFA726)
-    else -> Color(0xFFEF5350)
-}
-
-private fun successRate(relay: UiRelay): String {
-    if (relay.windowAttempts == 0) return "no attempts yet"
-    val pct = relay.windowSuccesses * 100 / relay.windowAttempts
-    val fails = if (relay.consecutiveFailures > 0) " · ${relay.consecutiveFailures} fails" else ""
-    return "$pct% · ${relay.windowSuccesses}/${relay.windowAttempts}$fails"
-}
-
-private fun metaLine(relay: UiRelay): String {
+private fun statusLine(relay: UiRelay): String {
     val now = System.currentTimeMillis()
-    // last_connect (set on every successful connect) is meaningful; last_seen
-    // only moves when the resolver re-runs, so it'd read stale for everyone.
-    val conn = relay.lastConnectMs
-    val base = when {
-        relay.isConnected && conn != null -> "up ${relativeDuration(now - conn)}"
-        conn != null -> "last up ${relativeDuration(now - conn)} ago"
-        else -> "never connected"
+    return when (relay.status) {
+        RelayStatus.LIVE -> relay.lastLatencyMs?.let { "Connected · $it ms" } ?: "Connected"
+        RelayStatus.PROBING -> "Checking…"
+        RelayStatus.IDLE -> if (relay.consecutiveFailures > 0) "Unreachable" else "Available"
+        RelayStatus.DOWN -> relay.backoffUntilMs?.takeIf { it > now }
+            ?.let { "Unreachable · retrying in ${relativeDuration(it - now)}" } ?: "Unreachable"
     }
-    val backoff = relay.backoffUntilMs?.takeIf { it > now }
-        ?.let { " · retry in ${relativeDuration(it - now)}" } ?: ""
-    return base + backoff
+}
+
+@Composable
+private fun statusColor(status: RelayStatus): Color {
+    val c = Promtuz.colors
+    return when (status) {
+        RelayStatus.LIVE -> c.success
+        RelayStatus.IDLE -> c.muted
+        RelayStatus.PROBING -> c.warn
+        RelayStatus.DOWN -> c.danger
+    }
 }
 
 private fun relativeDuration(ms: Long): String {
-    val s = (ms / 1000).coerceAtLeast(0)
+    val s = (ms / 1000).coerceAtLeast(1)
     return when {
-        s < 60 -> "${s}s"
-        s < 3600 -> "${s / 60}m"
-        s < 86400 -> "${s / 3600}h"
-        else -> "${s / 86400}d"
+        s < 60 -> "$s s"
+        s < 3600 -> "${s / 60} min"
+        s < 86400 -> "${s / 3600} h"
+        else -> "${s / 86400} d"
     }
 }
