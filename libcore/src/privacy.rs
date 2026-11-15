@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension};
 use zeroize::Zeroizing;
 const PREFIX: &str = "pz-private-v1:";
 const DOMAIN: &[u8] = b"promtuz-private-history-v1";
+const SALT_PREF: &str = "private_salt";
 
 fn random<const N: usize>() -> [u8; N] {
     use ed25519_dalek::ed25519::signature::rand_core::{OsRng, RngCore};
@@ -72,6 +73,9 @@ pub(crate) fn open_bytes(conv: &[u8; 16], bytes: &[u8]) -> Result<Vec<u8>> {
         .open(&enc, &HpkePrivateKey::new(key.to_vec()), DOMAIN, conv, &cipher, None, None, None)
         .map_err(|_| anyhow!("private decryption failed"))
 }
+pub(crate) fn open_if_sealed(conv: &[u8; 16], bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.starts_with(PREFIX.as_bytes()) { open_bytes(conv, bytes) } else { Ok(bytes.to_vec()) }
+}
 pub(crate) fn seal_tx(conn: &Connection, conv: &[u8; 16], content: &str) -> Result<String> {
     if !is_private_tx(conn, conv)? {
         return Ok(content.into());
@@ -91,33 +95,17 @@ pub(crate) fn hide(conv: &[u8; 16], code: &str) -> Result<()> {
     let _configuration = core().private_configuration.lock();
     let group = crate::data::conversation::Conversation::group_of(conv);
     let _operation = group.as_ref().map(|gid| crate::mls::recovery::operation_lock(gid).lock());
-    ensure!(
-        code.chars().count() >= 6 && code.len() <= 256,
-        "Use a code with at least 6 characters"
-    );
-    // One exact trigger identifies one chat. Derive every candidate rather than storing a fast
-    // password verifier, which would undermine Argon2's resistance to offline guessing.
-    ensure!(
-        find_code(
-            code,
-            false,
-            core().private_generation.load(std::sync::atomic::Ordering::SeqCst)
-        )?
-        .is_none(),
-        "That code already opens another chat"
-    );
+    ensure!(valid(code), "Use a code with at least 6 characters");
+    // One exact trigger identifies one chat. Trying the code against every wrapped key, rather
+    // than storing a fast verifier, keeps Argon2's resistance to offline guessing.
+    let mut keys = Derived::new();
+    ensure!(search(code, &mut keys)?.is_none(), "That code already opens another chat");
     let pair = crate::contact_card::hpke()
         .generate_key_pair()
         .map_err(|_| anyhow!("private key generation failed"))?;
-    let salt = random::<16>();
-    let key = derive(code, &salt)?;
-    let nonce = random::<24>();
-    let wrapped = XChaCha20Poly1305::new((&*key).into())
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload { msg: pair.private_key().as_slice(), aad: conv },
-        )
-        .map_err(|_| anyhow!("key encryption failed"))?;
+    let salt = shared_salt()?;
+    let key = keys.get(code, &salt)?;
+    let wrapped = wrap(&key, conv, pair.private_key().as_slice())?;
     let mut conn = core().db.messages().lock();
     ensure!(!is_private_tx(&conn, conv)?, "Chat is already locked");
     ensure!(
@@ -127,15 +115,15 @@ pub(crate) fn hide(conv: &[u8; 16], code: &str) -> Result<()> {
         ))?,
         "Chat not found"
     );
-    ensure!(!conn.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?1 AND outgoing=1 AND status=0)",[conv],|r|r.get::<_,bool>(0))?,"Wait for pending messages before locking this chat");
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO private_conversations VALUES(?1,?2,?3,?4)",
+        "INSERT INTO private_conversations(conversation_id,salt,public_key,wrapped_key,pin) VALUES(?1,?2,?3,?4,?5)",
         rusqlite::params![
             conv,
             salt.as_slice(),
             pair.public_key().as_slice(),
-            [nonce.as_slice(), &wrapped].concat()
+            &wrapped,
+            is_pin(code)
         ],
     )?;
     let messages: Vec<(String, String)> = crate::db::all(
@@ -189,49 +177,235 @@ pub(crate) fn hide(conv: &[u8; 16], code: &str) -> Result<()> {
             conv,
             pair.public_key().as_slice(),
             &salt,
-            &[nonce.as_slice(), &wrapped].concat(),
+            &wrapped,
         )?;
     }
     Ok(())
 }
-pub(crate) fn unlock(code: &str) -> Result<Option<[u8; 16]>> {
-    let generation = core().private_generation.load(std::sync::atomic::Ordering::SeqCst);
-    repair_transport()?;
-    find_code(code, true, generation)
+/// Turns a lock off for good: unseals everything `hide` sealed, using the open session's key.
+pub(crate) fn remove_lock(conv: &[u8; 16]) -> Result<()> {
+    let _configuration = core().private_configuration.lock();
+    let group = crate::data::conversation::Conversation::group_of(conv);
+    let _operation = group.as_ref().map(|gid| crate::mls::recovery::operation_lock(gid).lock());
+    ensure!(is_private(conv), "Chat is not locked");
+    ensure!(core().private_sessions.read().contains_key(conv), "Chat is locked");
+    ensure!(
+        !core().db.messages().lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM private_files WHERE conversation_id=?1 AND complete=0)",
+            [conv],
+            |r| r.get::<_, bool>(0),
+        )?,
+        "Wait for downloads in this chat to finish"
+    );
+    // Transport first: a vault row left behind on failure still opens it, and startup repair
+    // reseals it. The reverse order could strand sealed transport with no row able to open it.
+    if let Some(gid) = &group {
+        crate::mls::privacy::uninstall(gid)?;
+    }
+    let encrypted = crate::private_files::publish_conversation(conv)?;
+    let mut conn = core().db.messages().lock();
+    let tx = conn.transaction()?;
+    let messages = crate::db::all(&tx, "SELECT id,content FROM messages WHERE conversation_id=?1", [conv],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .into_iter()
+        .map(|(id, content)| Ok((id.clone(), if content.starts_with(PREFIX) { open_content(conv, &content)? } else { content })))
+        .collect::<Result<Vec<_>>>()?;
+    let media = crate::data::media::snapshot_tx(&tx, conv)?;
+    let grants = crate::transfer::sharing::snapshot_tx(&tx, conv)?;
+    let reactions = crate::data::reaction::private_rows_tx(&tx, conv)?;
+    let picture: Option<Vec<u8>> = tx
+        .query_row("SELECT avif FROM group_pictures WHERE conversation_id=?1", [conv], |r| r.get::<_, Option<Vec<u8>>>(0))
+        .optional()?
+        .flatten()
+        .map(|photo| open_if_sealed(conv, &photo))
+        .transpose()?;
+    let pending_key = format!("group_pending:{}", hex::encode(conv));
+    let pending = crate::data::app_prefs::get_tx(&tx, &pending_key)
+        .map(|value| if value.starts_with(PREFIX) { open_content(conv, &value) } else { Ok(value) })
+        .transpose()?;
+    tx.execute("DELETE FROM private_conversations WHERE conversation_id=?1", [conv])?;
+    for (id, content) in messages {
+        tx.execute("UPDATE messages SET content=?2 WHERE id=?1", (&id, &content))?;
+    }
+    crate::data::media::restore_tx(&tx, conv, media)?;
+    crate::transfer::sharing::restore_tx(&tx, &grants)?;
+    if let Some(photo) = picture {
+        tx.execute("UPDATE group_pictures SET avif=?2 WHERE conversation_id=?1", rusqlite::params![conv, photo])?;
+    }
+    if let Some(pending) = pending {
+        crate::data::app_prefs::set_tx(&tx, &pending_key, &pending)?;
+    }
+    for r in reactions {
+        tx.execute(
+            "INSERT OR REPLACE INTO reactions (conversation_id, dispatch_id, reactor, emoji, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (conv.as_slice(), &r.dispatch_id, r.reactor.as_slice(), &r.emoji, r.timestamp),
+        )?;
+    }
+    tx.execute("DELETE FROM private_reactions WHERE conversation_id=?1", [conv])?;
+    crate::private_files::clear_conversation_tx(&tx, conv)?;
+    tx.execute("UPDATE conversations SET muted=0 WHERE id=?1", [conv])?;
+    tx.commit()?;
+    drop(conn);
+    for path in encrypted {
+        let _ = std::fs::remove_file(path);
+    }
+    core().private_sessions.write().remove(conv);
+    crate::data::peer_avatar::notify_changed();
+    Ok(())
 }
-fn find_code(code: &str, install: bool, generation: u64) -> Result<Option<[u8; 16]>> {
-    if code.len() > 256 || code.chars().count() < 6 {
+
+#[cfg(test)]
+pub(crate) fn unlock(code: &str) -> Result<Option<[u8; 16]>> {
+    unlock_at(code, core().private_generation.load(std::sync::atomic::Ordering::SeqCst))
+}
+/// `generation` is read by the caller before it decides to unlock, so a lock in between cancels.
+pub(crate) fn unlock_at(code: &str, generation: u64) -> Result<Option<[u8; 16]>> {
+    repair_transport()?;
+    if !valid(code) {
         return Ok(None);
     }
-    let rows: Vec<([u8; 16], Vec<u8>, Vec<u8>)> = crate::db::all(
-        &core().db.messages().lock(),
-        "SELECT conversation_id,salt,wrapped_key FROM private_conversations",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    for (conv, salt, wrapped) in rows {
-        if wrapped.len() < 40 {
-            return Err(anyhow!("invalid private key record"));
+    let mut keys = Derived::new();
+    let Some((conv, private, salt)) = search(code, &mut keys)? else { return Ok(None) };
+    let opened = linked(&conv)?;
+    {
+        let mut sessions = core().private_sessions.write();
+        ensure!(
+            generation == core().private_generation.load(std::sync::atomic::Ordering::SeqCst),
+            "Unlock cancelled"
+        );
+        for chat in &opened {
+            sessions.insert(*chat, Zeroizing::new(private.to_vec()));
         }
-        let key = derive(code, &salt)?;
+    }
+    if let Err(error) = rewrap(&conv, &private, &salt, code, &mut keys) {
+        log::warn!("PRIVATE: key stays under its own salt: {error:#}");
+    }
+    Ok(Some(conv))
+}
+/// Every chat one code opens: a lock and the Secret chats that share its key.
+pub(crate) fn linked(conv: &[u8; 16]) -> Result<Vec<[u8; 16]>> {
+    Ok(crate::db::all(
+        &core().db.messages().lock(),
+        "SELECT conversation_id FROM private_conversations
+         WHERE public_key=(SELECT public_key FROM private_conversations WHERE conversation_id=?1)",
+        [conv],
+        |r| r.get(0),
+    )?)
+}
+/// Puts the new, empty `conv` under `owner`'s lock. Needs no code: incoming traffic is sealed to
+/// the public key, and an open session for `owner` opens `conv` too. Caller holds the configuration lock.
+pub(crate) fn link(conv: &[u8; 16], owner: &[u8; 16]) -> Result<()> {
+    {
+        let conn = core().db.messages().lock();
+        let changed = conn.execute(
+            "INSERT INTO private_conversations(conversation_id,salt,public_key,wrapped_key,owner,pin)
+             SELECT ?1,salt,public_key,wrapped_key,coalesce(owner,conversation_id),pin FROM private_conversations
+             WHERE conversation_id=?2",
+            [conv, owner],
+        )?;
+        ensure!(changed == 1, "Chat is not locked");
+        conn.execute("UPDATE conversations SET muted=1,pinned=0 WHERE id=?1", [conv])?;
+    }
+    let mut sessions = core().private_sessions.write();
+    if let Some(private) = sessions.get(owner).cloned() {
+        sessions.insert(*conv, private);
+    }
+    Ok(())
+}
+fn valid(code: &str) -> bool {
+    code.chars().count() >= 6 && code.len() <= 256
+}
+pub(crate) fn is_pin(code: &str) -> bool {
+    code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
+}
+pub(crate) fn uses_pin(conv: &[u8; 16]) -> bool {
+    core()
+        .db
+        .messages()
+        .lock()
+        .query_row("SELECT pin FROM private_conversations WHERE conversation_id=?1", [conv], |r| r.get(0))
+        .unwrap_or(false)
+}
+/// One Argon2 run per distinct salt per attempt. New locks share the device salt, so an attempt
+/// costs one derivation however many chats are locked.
+struct Derived(Vec<(Vec<u8>, Zeroizing<[u8; 32]>)>);
+impl Derived {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+    fn get(&mut self, code: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+        if let Some((_, key)) = self.0.iter().find(|(s, _)| s == salt) {
+            return Ok(key.clone());
+        }
+        let key = derive(code, salt)?;
+        self.0.push((salt.to_vec(), key.clone()));
+        Ok(key)
+    }
+}
+fn shared_salt() -> Result<Vec<u8>> {
+    let conn = core().db.messages().lock();
+    if let Some(salt) = crate::data::app_prefs::get_tx(&conn, SALT_PREF).and_then(|h| hex::decode(h).ok())
+        && salt.len() == 16
+    {
+        return Ok(salt);
+    }
+    let salt = random::<16>();
+    crate::data::app_prefs::set_tx(&conn, SALT_PREF, &hex::encode(salt))?;
+    Ok(salt.to_vec())
+}
+fn search(code: &str, keys: &mut Derived) -> Result<Option<([u8; 16], Zeroizing<Vec<u8>>, Vec<u8>)>> {
+    let rows: Vec<([u8; 16], Vec<u8>, Vec<u8>, [u8; 16])> = crate::db::all(
+        &core().db.messages().lock(),
+        "SELECT conversation_id,salt,wrapped_key,coalesce(owner,conversation_id) FROM private_conversations",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    for (conv, salt, wrapped, aad) in rows {
+        ensure!(wrapped.len() >= 40, "invalid private key record");
+        let key = keys.get(code, &salt)?;
         if let Ok(private) = XChaCha20Poly1305::new((&*key).into()).decrypt(
             XNonce::from_slice(&wrapped[..24]),
-            Payload { msg: &wrapped[24..], aad: &conv },
+            Payload { msg: &wrapped[24..], aad: &aad },
         ) {
-            let private = Zeroizing::new(private);
-            if !install {
-                return Ok(Some(conv));
-            }
-            let mut sessions = core().private_sessions.write();
-            ensure!(
-                generation == core().private_generation.load(std::sync::atomic::Ordering::SeqCst),
-                "Unlock cancelled"
-            );
-            sessions.insert(conv, private);
-            return Ok(Some(conv));
+            return Ok(Some((conv, Zeroizing::new(private), salt)));
         }
     }
     Ok(None)
+}
+fn wrap(key: &[u8; 32], conv: &[u8; 16], private: &[u8]) -> Result<Vec<u8>> {
+    let nonce = random::<24>();
+    let wrapped = XChaCha20Poly1305::new(key.into())
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: private, aad: conv })
+        .map_err(|_| anyhow!("key encryption failed"))?;
+    Ok([nonce.as_slice(), &wrapped].concat())
+}
+/// Moves a key locked before the shared salt onto it, so later attempts skip its derivation.
+fn rewrap(conv: &[u8; 16], private: &[u8], salt: &[u8], code: &str, keys: &mut Derived) -> Result<()> {
+    let _configuration = core().private_configuration.lock();
+    let shared = shared_salt()?;
+    if shared == salt {
+        return Ok(());
+    }
+    let key = keys.get(code, &shared)?;
+    for chat in linked(conv)? {
+        let aad: [u8; 16] = core().db.messages().lock().query_row(
+            "SELECT coalesce(owner,conversation_id) FROM private_conversations WHERE conversation_id=?1",
+            [chat],
+            |r| r.get(0),
+        )?;
+        let wrapped = wrap(&key, &aad, private)?;
+        let changed = core().db.messages().lock().execute(
+            "UPDATE private_conversations SET salt=?2,wrapped_key=?3 WHERE conversation_id=?1 AND salt=?4",
+            rusqlite::params![chat, shared, wrapped, salt],
+        )?;
+        if changed == 1 {
+            core().db.mls().lock().execute(
+                "UPDATE mls_private_conversations SET salt=?2,wrapped_key=?3 WHERE conversation_id=?1",
+                rusqlite::params![chat, shared, wrapped],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -321,8 +495,60 @@ mod tests {
         assert!(!is_private(&second));
         let old = core().private_generation.load(std::sync::atomic::Ordering::SeqCst);
         lock_private_conversations();
-        assert!(find_code("unique-code", true, old).is_err());
+        assert!(unlock_at("unique-code", old).is_err());
         assert!(core().private_sessions.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_key_under_its_own_salt_still_opens_and_moves_to_the_shared_salt() {
+        let scope = crate::test_support::ScopedCore::new();
+        let conv = [77u8; 16];
+        let db = scope.core.db.messages();
+        db.lock().execute("INSERT INTO conversations(id) VALUES(?1)", [conv]).unwrap();
+        Message::save_incoming(conv, [78; 32], &[6; 16], "before the move", 1, None).unwrap();
+        hide(&conv, "legacy-code").unwrap();
+        let salt = || db.lock().query_row("SELECT salt FROM private_conversations", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
+        let legacy = salt();
+        crate::data::app_prefs::set_tx(&db.lock(), SALT_PREF, &hex::encode([9u8; 16])).unwrap();
+        assert_eq!(unlock("legacy-code").unwrap(), Some(conv));
+        assert_ne!(salt(), legacy);
+        assert_eq!(salt(), [9u8; 16]);
+        lock_private_conversations();
+        assert_eq!(unlock("legacy-code").unwrap(), Some(conv));
+        assert_eq!(Message::get_messages(&conv, 100, "")[0].content, "before the move");
+    }
+
+    #[tokio::test]
+    async fn removing_a_lock_restores_history_reactions_media_and_transport_in_the_clear() {
+        let scope = crate::test_support::ScopedCore::new();
+        let (conv, gid, peer, did) = ([79u8; 16], [80u8; 32], [81u8; 32], [7u8; 16]);
+        let db = scope.core.db.messages();
+        db.lock().execute("INSERT INTO conversations(id,mls_group_id) VALUES(?1,?2)", rusqlite::params![conv, gid]).unwrap();
+        let mut key = Vec::new();
+        ciborium::ser::into_writer(&openmls::prelude::GroupId::from_slice(&gid), &mut key).unwrap();
+        let mls = scope.core.db.mls();
+        mls.lock().execute("INSERT INTO mls_storage VALUES(?1,10,X'',?2)", rusqlite::params![key, b"ratchet secret".as_slice()]).unwrap();
+        Message::save_incoming(conv, peer, &did, "kept history", 1, None).unwrap();
+        Reaction::apply(&conv, &did, &peer, "heart", true, 2);
+        db.lock().execute("INSERT INTO message_media(conversation_id,dispatch_id,kind,mime,name,file_id) VALUES(?1,?2,2,'text/plain','notes.txt',?3)", rusqlite::params![conv, did, [8u8; 32]]).unwrap();
+        hide(&conv, "remove-me-code").unwrap();
+        assert!(remove_lock(&conv).is_err(), "removing needs the open session");
+        assert_eq!(unlock("remove-me-code").unwrap(), Some(conv));
+        Reaction::apply(&conv, &did, &peer, "fire", true, 3);
+        remove_lock(&conv).unwrap();
+
+        assert!(!is_private(&conv));
+        let raw: String = db.lock().query_row("SELECT content FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(raw, "kept history");
+        assert_eq!(Reaction::for_conversation(&conv).len(), 2);
+        let (mime, name): (String, String) = db.lock().query_row("SELECT mime,name FROM message_media", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((mime.as_str(), name.as_str()), ("text/plain", "notes.txt"));
+        let value: Vec<u8> = mls.lock().query_row("SELECT value FROM mls_storage WHERE group_id=?1", [&key], |r| r.get(0)).unwrap();
+        assert_eq!(value, b"ratchet secret");
+        assert_eq!(mls.lock().query_row("SELECT count(*) FROM mls_private_conversations", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
+        lock_private_conversations();
+        assert_eq!(Message::get_messages(&conv, 100, "")[0].content, "kept history");
+        assert_eq!(unlock("remove-me-code").unwrap(), None);
     }
 
     #[tokio::test]
@@ -405,7 +631,7 @@ mod tests {
         mls.lock().execute("INSERT INTO mls_storage VALUES(?1,10,X'',?2)", rusqlite::params![key,b"old group secret".as_slice()]).unwrap();
         Message::save_incoming(conv, peer, &[5; 16], "group history", 1, None).unwrap();
         hide_conversation(conv.to_vec(), "group-reset-code".into()).unwrap();
-        assert!(crate::api::messaging::list_conversations().iter().all(|c| c.id != conv));
+        assert!(crate::api::messaging::list_conversations().iter().any(|c| c.id == conv && c.locked));
         assert!(crate::api::messaging::get_messages(conv.to_vec(), 100, "".into()).is_err());
         assert_eq!(unlock("group-reset-code").unwrap(), Some(conv));
         assert_eq!(Message::get_messages(&conv, 100, "")[0].content, "group history");

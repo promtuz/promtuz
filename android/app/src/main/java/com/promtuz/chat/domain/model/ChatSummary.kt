@@ -4,7 +4,7 @@ data class ChatSummary(
     val conversationHex: String,
     /** Display name: a group's title, or the peer's contact name for a 1:1. */
     val name: String,
-    /** 0 = direct (a 1:1 chat), 1 = group. */
+    /** 0 = direct (a 1:1 chat), 1 = group, 2 = Secret (a second 1:1 with the same person). */
     val kind: Int = 0,
     val peerHex: String? = null,
     val memberCount: Int = 2,
@@ -37,6 +37,9 @@ data class ChatSummary(
     val rawTitle: String = "",
     /** A message request we have not accepted. */
     val request: Boolean = false,
+    /** Opens only with its code; carries no preview. */
+    val locked: Boolean = false,
 ) {
     val isGroup: Boolean get() = kind == 1
+    val isSecret: Boolean get() = kind == 2
 }

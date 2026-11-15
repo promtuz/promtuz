@@ -43,37 +43,7 @@ impl Reaction {
     pub fn for_conversation(conversation_id: &[u8; 16]) -> Vec<ReactionRow> {
         let conn = core().db.messages().lock();
         if crate::privacy::is_private_tx(&conn, conversation_id).unwrap_or(true) {
-            let operations: Vec<Vec<u8>> = all(
-                &conn,
-                "SELECT operation FROM private_reactions WHERE conversation_id=?1 ORDER BY id",
-                [conversation_id],
-                |r| r.get(0),
-            )
-            .unwrap_or_default();
-            let mut rows: Vec<ReactionRow> = Vec::new();
-            for op in operations {
-                let Ok(bytes) = crate::privacy::open_bytes(conversation_id, &op) else {
-                    return Vec::new();
-                };
-                let Ok((dispatch_id, reactor, emoji, add, timestamp)) =
-                    postcard::from_bytes::<(Vec<u8>, [u8; 32], String, bool, u64)>(&bytes)
-                else {
-                    return Vec::new();
-                };
-                rows.retain(|r| {
-                    !(r.dispatch_id == dispatch_id && r.reactor == reactor && r.emoji == emoji)
-                });
-                if add {
-                    rows.push(ReactionRow {
-                        conversation_id: *conversation_id,
-                        dispatch_id,
-                        reactor,
-                        emoji,
-                        timestamp,
-                    });
-                }
-            }
-            return rows;
+            return private_rows_tx(&conn, conversation_id).unwrap_or_default();
         }
         drop(conn);
         all(
@@ -122,6 +92,26 @@ impl Reaction {
     }
 }
 
+/// Replays the sealed operation log; needs the chat's open session.
+pub(crate) fn private_rows_tx(conn: &rusqlite::Connection, conversation_id: &[u8; 16]) -> anyhow::Result<Vec<ReactionRow>> {
+    let operations: Vec<Vec<u8>> = all(
+        conn,
+        "SELECT operation FROM private_reactions WHERE conversation_id=?1 ORDER BY id",
+        [conversation_id],
+        |r| r.get(0),
+    )?;
+    let mut rows: Vec<ReactionRow> = Vec::new();
+    for op in operations {
+        let bytes = crate::privacy::open_bytes(conversation_id, &op)?;
+        let (dispatch_id, reactor, emoji, add, timestamp) =
+            postcard::from_bytes::<(Vec<u8>, [u8; 32], String, bool, u64)>(&bytes)?;
+        rows.retain(|r| !(r.dispatch_id == dispatch_id && r.reactor == reactor && r.emoji == emoji));
+        if add {
+            rows.push(ReactionRow { conversation_id: *conversation_id, dispatch_id, reactor, emoji, timestamp });
+        }
+    }
+    Ok(rows)
+}
 pub(crate) fn private_apply_tx(
     conn: &rusqlite::Connection, conv: &[u8; 16], did: &[u8], reactor: &[u8; 32], emoji: &str,
     add: bool, timestamp: u64,

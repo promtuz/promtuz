@@ -334,7 +334,7 @@ pub(super) async fn send_payload<C: DhtClient>(
 
 /// A missing KeyPackage is transient, so the message stays pending for a retry. The fetch fails
 /// before any group state exists, so the retry cannot duplicate the group.
-fn awaits_keypackage(e: &anyhow::Error) -> bool {
+pub(super) fn awaits_keypackage(e: &anyhow::Error) -> bool {
     e.chain().any(|c| matches!(c.downcast_ref::<DhtClientError>(), Some(DhtClientError::NoStash)))
 }
 

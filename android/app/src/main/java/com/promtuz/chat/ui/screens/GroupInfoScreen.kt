@@ -129,6 +129,9 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     var removing by remember { mutableStateOf<UiMember?>(null) }
     var leaving by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
+    var removingLock by remember { mutableStateOf(false) }
+    val privateIds by app.privateIds.collectAsState()
+    val locked = conversation != null && conversation in privateIds
     val busy = work is GroupWork.Busy
     BackHandler(busy) { }
     val active = members.filter { it.active }
@@ -154,19 +157,22 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
         GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = size, conversation = conversation,
             onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("group:$conversation", it, displayName))) } })
     }, actions = {
-        if (canEdit && conversation != null) AppDropMenu(
+        if (conversation != null) AppDropMenu(
             anchor = { DrawableIcon(com.promtuz.chat.R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Group options") },
-            groups = listOf(buildList {
-                add(MenuAction("Set group photo", com.promtuz.chat.R.drawable.oi_camera) {
+            groups = listOf(listOf(
+                if (locked) MenuAction("Remove lock", com.promtuz.chat.R.drawable.oi_lock_chat_open) { removingLock = true }
+                else MenuAction("Lock chat", com.promtuz.chat.R.drawable.oi_lock_chat) { app.navigator.push(com.promtuz.chat.navigation.Routes.LockChat(conversation)) },
+            ), buildList {
+                if (canEdit) add(MenuAction("Set group photo", com.promtuz.chat.R.drawable.oi_camera) {
                     picker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
                 })
-                if (picture != null) add(MenuAction("Remove group photo", com.promtuz.chat.R.drawable.oi_trash, destructive = true) {
+                if (canEdit && picture != null) add(MenuAction("Remove group photo", com.promtuz.chat.R.drawable.oi_trash, destructive = true) {
                     scope.launch {
                         runCatching { com.promtuz.core.CoreBridge.clearGroupPicture(conversation.fromHex()) }
                             .onFailure { snackbar.showSnackbar("Couldn't remove group photo") }
                     }
                 })
-            }),
+            }).filter { it.isNotEmpty() },
         )
     }) { padding ->
         Box(Modifier.fillMaxSize()) {
@@ -311,6 +317,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     GroupConfirmation("Delete chat?",
         "This deletes your messages and group access from this device. Other members keep the group, but no one will be able to add or remove members. This can’t be undone.",
         "Delete", work, { deleting = false; actions.clearError() }, { actions.deleteAnyway() }, visible = deleting)
+    if (removingLock && conversation != null) RemoveLockDialog(app, conversation, displayName) { removingLock = false }
 }
 
 @Composable

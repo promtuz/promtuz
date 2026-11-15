@@ -18,8 +18,11 @@ object PrivateChatSession {
     fun protectInput(): AutoCloseable {
         inputOwners++
         _secure.value = true
+        var open = true
         return AutoCloseable {
-            inputOwners = (inputOwners - 1).coerceAtLeast(0)
+            if (!open) return@AutoCloseable
+            open = false
+            inputOwners--
             _secure.value = inputOwners > 0 || _active.value != null
         }
     }
@@ -29,23 +32,23 @@ object PrivateChatSession {
     val revision = _revision.asStateFlow()
     @Volatile var sessionId: Long? = null
         private set
-    @Volatile var generation: Long = 0
-        private set
+    /** Core owns the only counter; any lock or cancel moves it and refuses older unlocks. */
+    val generation: Long get() = uniffi.core.privateGeneration().toLong()
     @Volatile var foreground: Boolean = false
         private set
     private val expiry = Runnable { if (policy.expire(SystemClock.elapsedRealtime())) lock() }
 
-    fun arm(conversationHex: String) {
-        check(foreground) { "Private chat requires foreground" }
+    fun arm(conversationHex: String): Boolean {
+        if (!foreground) return false
         if (_active.value != conversationHex || sessionId == null) sessionId = generation
         policy.arm()
         _active.value = conversationHex
         _revision.value++
         _secure.value = true
+        return true
     }
     fun clear() {
         val hadPrivateContent = _active.value != null
-        generation++
         sessionId = null
         policy.clear()
         handler.removeCallbacks(expiry)
@@ -83,13 +86,13 @@ object PrivateChatSession {
     }
     fun paused() {
         foreground = false
-        generation++
+        uniffi.core.cancelPrivateUnlocks()
         if (policy.depart(SystemClock.elapsedRealtime())) lock()
         else if (_active.value == null) clear()
     }
     fun screenOff() {
         foreground = false
-        generation++
+        uniffi.core.cancelPrivateUnlocks()
         if (policy.screenOff()) lock() else clear()
     }
 }

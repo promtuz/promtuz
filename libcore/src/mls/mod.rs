@@ -22,6 +22,7 @@ pub use epoch_catchup::PushOutcome;
 pub use group::Changed;
 pub use group::CommitOutcome;
 pub use group::GROUP_META_EXTENSION;
+pub use group::SECRET_EXTENSION;
 pub use group::GroupMeta;
 pub use group::MlsGroupHandle;
 pub use group::PROMTUZ_CIPHERSUITE;
@@ -35,6 +36,7 @@ pub use types::PromtuzMlsStorageError;
 pub use welcome::encode_welcome;
 pub use welcome::make_welcome_envelope;
 pub use welcome::process_welcome;
+pub use welcome::welcome_is_secret;
 pub use welcome::seal_welcome_blob;
 
 /// Per-group ceiling on stored MLS state. The last line of defence against a runaway Add chain;

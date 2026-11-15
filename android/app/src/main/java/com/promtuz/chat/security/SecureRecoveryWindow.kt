@@ -10,6 +10,8 @@ internal object SecureRecoveryWindow {
     private val leases = WeakHashMap<Window, Lease>()
 
     fun acquire(window: Window) {
+        // Local debug builds stay capturable for screenshots and screen recordings.
+        if (com.promtuz.chat.BuildConfig.DEBUG) return
         val lease = leases.getOrPut(window) {
             Lease(0, window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
         }

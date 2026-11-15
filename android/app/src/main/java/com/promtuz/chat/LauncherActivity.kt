@@ -7,10 +7,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
 import android.os.PowerManager
-import android.view.WindowManager
 import androidx.lifecycle.lifecycleScope
 import com.promtuz.chat.security.PrivateChatSession
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collectLatest
+import androidx.lifecycle.withResumed
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -104,10 +105,20 @@ class LauncherActivity : ComponentActivity() {
             PrivateChatSession.exits.collect { enforcePrivateExit() }
         }
         lifecycleScope.launch {
-            PrivateChatSession.secure.collect { secure ->
-                if (secure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                // Retain protection until this Activity is destroyed. Clearing it while a
-                // private screen exits could expose its last frame to task snapshots.
+            var held = false
+            PrivateChatSession.secure.collectLatest { secure ->
+                if (secure && !held) {
+                    com.promtuz.chat.security.SecureRecoveryWindow.acquire(window)
+                    held = true
+                } else if (!secure && held) {
+                    // Release only after the private screen's exit animation and only in front,
+                    // so no task snapshot can catch its last frame.
+                    kotlinx.coroutines.delay(1000)
+                    lifecycle.withResumed {
+                        com.promtuz.chat.security.SecureRecoveryWindow.release(window)
+                        held = false
+                    }
+                }
             }
         }
         enableEdgeToEdge()

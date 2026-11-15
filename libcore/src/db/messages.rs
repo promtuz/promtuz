@@ -48,6 +48,8 @@ pub const SYSTEM_ROLE: u8 = 6;
 /// `sender_ipk` changed a group rule; `content` is `<rule>:<0|1>`, the rule
 /// being `add`, `edit`, `send` or `appoint`.
 pub const SYSTEM_RULES: u8 = 7;
+/// `sender_ipk` deleted this Secret chat on their side.
+pub const SYSTEM_ENDED: u8 = 8;
 
 impl MessageRow {
     pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
@@ -637,6 +639,12 @@ const MIGRATION_ARRAY: &[M] = &[
     ) WITHOUT ROWID;").down("CREATE TEMP TABLE private_files_rollback_guard (n INTEGER CHECK(n=0));
         INSERT INTO private_files_rollback_guard SELECT count(*) FROM private_files;
         DROP TABLE private_files_rollback_guard; DROP TABLE private_file_refs; DROP TABLE private_files;"),
+    // A Secret chat started beside a locked chat shares its key; the key stays wrapped under `owner`.
+    M::up("ALTER TABLE private_conversations ADD COLUMN owner BLOB;")
+        .down("ALTER TABLE private_conversations DROP COLUMN owner;"),
+    // Tells the code screen to show a keypad before anything is unlocked.
+    M::up("ALTER TABLE private_conversations ADD COLUMN pin INTEGER NOT NULL DEFAULT 0;")
+        .down("ALTER TABLE private_conversations DROP COLUMN pin;"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.

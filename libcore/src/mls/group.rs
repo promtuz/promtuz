@@ -34,6 +34,15 @@ const PROMTUZ_GROUP_META_EXT: u16 = 0xF100;
 /// the group context.
 pub const GROUP_META_EXTENSION: ExtensionType = ExtensionType::Unknown(PROMTUZ_GROUP_META_EXT);
 
+/// Marks a pair as a Secret chat in the signed context, so a relay can neither strip nor add it.
+const PROMTUZ_SECRET_EXT: u16 = 0xF101;
+
+pub const SECRET_EXTENSION: ExtensionType = ExtensionType::Unknown(PROMTUZ_SECRET_EXT);
+
+pub(crate) fn declares_secret(exts: &Extensions<GroupContext>) -> bool {
+    exts.iter().any(|e| matches!(e, Extension::Unknown(PROMTUZ_SECRET_EXT, _)))
+}
+
 /// What its founder says a group is, since a group of two looks like a 1:1 on the wire. It lives in
 /// the signed group context, so a relay can neither strip nor forge it, and arrives in the Welcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +150,32 @@ impl MlsGroupHandle {
         provider: &PromtuzMlsProvider, signer: &S, credential_with_key: CredentialWithKey,
         group_id: &[u8; 32], meta: Option<&GroupMeta>,
     ) -> Result<Self> {
+        let exts = meta.map(|m| m.extensions().map(|e| (e, &[GROUP_META_EXTENSION][..]))).transpose()?;
+        Self::create_with(provider, signer, credential_with_key, group_id, exts)
+    }
+
+    /// A pair whose context says it is a Secret chat. The peer's KeyPackage must declare it.
+    pub fn create_secret<S: Signer>(
+        provider: &PromtuzMlsProvider, signer: &S, credential_with_key: CredentialWithKey,
+        group_id: &[u8; 32],
+    ) -> Result<Self> {
+        let exts = Extensions::from_vec(vec![
+            Extension::Unknown(PROMTUZ_SECRET_EXT, UnknownExtension(vec![1])),
+            Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+                &[SECRET_EXTENSION],
+                &[],
+                &[],
+            )),
+        ])
+        .map_err(|e| MlsGroupError::Codec(format!("secret extension: {e}")))?;
+        let caps = [GROUP_META_EXTENSION, SECRET_EXTENSION];
+        Self::create_with(provider, signer, credential_with_key, group_id, Some((exts, &caps[..])))
+    }
+
+    fn create_with<S: Signer>(
+        provider: &PromtuzMlsProvider, signer: &S, credential_with_key: CredentialWithKey,
+        group_id: &[u8; 32], exts: Option<(Extensions<GroupContext>, &[ExtensionType])>,
+    ) -> Result<Self> {
         let mut create_config = MlsGroupCreateConfig::builder()
             .ciphersuite(PROMTUZ_CIPHERSUITE)
             // Handshake framing stays opaque to the relay. Pinned rather than
@@ -150,8 +185,7 @@ impl MlsGroupHandle {
             // Welcomes carry the ratchet tree; there is no other channel to send it.
             .use_ratchet_tree_extension(true);
 
-        if let Some(meta) = meta {
-            let exts = meta.extensions()?;
+        if let Some((exts, caps)) = exts {
             // The founder's own leaf must declare the extension too: RFC 9420 holds every member,
             // including whoever added the extension, to the same bar.
             create_config = create_config
@@ -159,7 +193,7 @@ impl MlsGroupHandle {
                 .capabilities(Capabilities::new(
                     None,
                     Some(&[PROMTUZ_CIPHERSUITE]),
-                    Some(&[GROUP_META_EXTENSION]),
+                    Some(caps),
                     None,
                     None,
                 ));
@@ -591,6 +625,10 @@ impl MlsGroupHandle {
     /// A group chat rather than a pair. Only group chats require bound credentials.
     pub fn is_group_chat(&self) -> bool {
         declares_group_meta(self.inner.extensions())
+    }
+
+    pub fn is_secret(&self) -> bool {
+        declares_secret(self.inner.extensions())
     }
 
     /// `None` for a leaf that proves nothing under this group's rule.

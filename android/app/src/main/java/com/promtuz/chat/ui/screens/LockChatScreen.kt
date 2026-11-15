@@ -1,139 +1,141 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.IconButton
 import androidx.activity.compose.BackHandler
-import com.promtuz.chat.ui.components.*
-import androidx.compose.foundation.lazy.LazyColumn
-import com.promtuz.chat.navigation.LocalNavForeground
-
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
+import com.promtuz.chat.navigation.LocalNavForeground
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.core.CoreBridge
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
 fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Unit) {
     DisposableEffect(Unit) {
-        val protection = com.promtuz.chat.security.PrivateChatSession.protectInput()
+        val protection = PrivateChatSession.protectInput()
         onDispose { protection.close() }
     }
-    var code by remember { mutableStateOf("") }
-    var visible by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
-    var pendingCode by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
-    val context = androidx.compose.ui.platform.LocalContext.current
     val foreground = LocalNavForeground.current
-    BackHandler(busy) { }
-    fun requestLock() {
-        if (foreground && !busy && code.length >= 6) pendingCode = code
+    var pin by remember { mutableStateOf(true) }
+    var code by remember { mutableStateOf("") }
+    var first by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var done by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var errorShown by remember { mutableIntStateOf(0) }
+    var shakes by remember { mutableIntStateOf(0) }
+    LaunchedEffect(errorShown) { if (errorShown > 0) { delay(3000); error = null } }
+
+    fun fail(message: String) {
+        haptic.performHapticFeedback(HapticFeedbackType.Reject)
+        code = ""
+        error = message
+        errorShown++
+        shakes++
     }
-    fun lock(chosenCode: String) {
-        if (!foreground || busy || chosenCode.length < 6) return
+    fun restart() { code = ""; first = null; error = null }
+    BackHandler(busy || first != null) { if (!busy) restart() }
+
+    fun submit() {
+        if (!foreground || busy || code.length < PIN_LENGTH) return
+        val chosen = code
+        val confirmed = first ?: run { first = chosen; code = ""; error = null; return }
+        if (chosen != confirmed) return fail("Codes don't match. Try again.")
         busy = true
         scope.launch {
-            runCatching { CoreBridge.hideConversation(conversation.fromHex(), chosenCode) }
+            runCatching { CoreBridge.hideConversation(conversation.fromHex(), chosen) }
                 .onSuccess {
                     com.promtuz.core.call.CallNotifications.clearConversation(context, conversation.fromHex())
                     runCatching { com.promtuz.core.push.PushNotifier.refresh() }
-                    code = ""
+                    haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+                    done = true
+                    delay(600)
                     onLocked()
                 }
-                .onFailure { error = it.message ?: "Couldn't lock this chat" }
+                .onFailure { first = null; fail(it.message ?: "Couldn't lock this chat") }
             busy = false
         }
     }
+    fun type(c: Char) {
+        if (busy || done || code.length >= PIN_LENGTH) return
+        code += c
+        if (code.length == PIN_LENGTH) submit()
+    }
+    fun erase() { if (!busy && !done) code = code.dropLast(1) }
+
+    val keys = remember { FocusRequester() }
+    LaunchedEffect(pin) { if (pin) keys.requestFocus() }
+
     SimpleScreen(
         title = { Text("Lock chat") },
         connectionStatus = false,
         navigationIcon = {
-            IconButton(onClick = { if (!busy) onBack() }, enabled = !busy) {
+            IconButton(onClick = { if (first != null) restart() else onBack() }, enabled = !busy) {
                 TopBarMorphIcon(MorphGlyph.Back, "Back")
             }
         },
         actions = {
-            IconButton(enabled = foreground && !busy && code.length >= 6, onClick = { requestLock() }) {
-                if (busy) CircularProgressIndicator(
-                    Modifier.size(24.dp), strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.primary,
-                ) else DrawableIcon(R.drawable.oi_lock_chat, desc = "Lock chat", tint = LocalContentColor.current)
-            }
+            AppDropMenu(
+                anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Lock options") },
+                groups = listOf(listOf(MenuAction(if (pin) "Use a password instead" else "Use a PIN instead") {
+                    if (!busy) { pin = !pin; restart() }
+                })),
+            )
         },
     ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().consumeWindowInsets(padding).imePadding(),
-            contentPadding = padding.listPadding(top = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            item {
-                AppTextField(
-                    value = code,
-                    onValueChange = { code = it; error = null },
-                    label = "Code",
-                    placeholder = "6+ characters",
-                    enabled = !busy,
-                    isError = error != null,
-                    visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
-                        autoCorrectEnabled = false,
-                        imeAction = ImeAction.Done,
-                    ),
-                    keyboardActions = KeyboardActions(onDone = { requestLock() }),
-                    trailingIcon = {
-                        IconButton(enabled = !busy, onClick = { visible = !visible }) {
-                            DrawableIcon(
-                                if (visible) R.drawable.oi_eye_slash else R.drawable.oi_eye,
-                                desc = if (visible) "Hide code" else "Show code",
-                                tint = LocalContentColor.current,
-                            )
-                        }
-                    },
-                    supportingIcon = { DrawableIcon(R.drawable.oi_info, size = 16.dp, tint = LocalContentColor.current) },
-                    supportingText = {
-                        Text(error ?: "Enter this code in home search to open the chat.")
-                    },
-                )
-            }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Hidden and silent", style = MaterialTheme.typography.titleMedium)
-                    Text("Hidden from chat lists and normal search. Message notifications are disabled for this chat.",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(
+            Modifier.fillMaxSize().padding(top = padding.calculateTopPadding()).consumeWindowInsets(padding).imePadding()
+                .focusRequester(keys).focusable().then(if (pin) Modifier.codeKeys(::type, ::erase) else Modifier),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.weight(1f))
+            DrawableIcon(R.drawable.oi_lock_chat, size = 40.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(16.dp))
+            AnimatedContent(first != null, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
+                label = "step") { confirming ->
+                Column(Modifier.padding(horizontal = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(if (confirming) "Re-enter your code" else "Create a code", style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (confirming) "If you forget it, resetting deletes this chat's history."
+                        else "You'll need it to open this chat. Its notifications turn off.",
+                        style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center, minLines = 2,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Keep your code", style = MaterialTheme.typography.titleMedium)
-                    Text("Your code protects this chat’s messages and media. If you forget it, resetting the chat deletes its history. The contact stays.",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(28.dp))
+            if (pin) CodeBoxes(code, done, Modifier.shake(shakes))
+            else PasswordField(code, { if (!busy && !done) code = it }, enabled = !busy && !done,
+                onDone = ::submit, modifier = Modifier.shake(shakes))
+            Box(Modifier.height(44.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.animation.AnimatedVisibility(error != null, enter = fadeIn(), exit = fadeOut()) {
+                    Text(error.orEmpty(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                 }
             }
+            Spacer(Modifier.weight(1f))
+            if (pin) CodeKeypad(::type, ::erase, { if (!busy && !done) code = "" },
+                Modifier.padding(bottom = padding.calculateBottomPadding() + 24.dp))
         }
-    }
-    pendingCode?.let { chosenCode ->
-        AppAlertDialog(
-            onDismissRequest = { pendingCode = null },
-            title = { Text("Lock this chat?") },
-            text = { Text("This hides the chat and turns off its message notifications. If you forget the code, you’ll need to delete all its history to use it again. The contact stays.") },
-            confirmButton = {
-                TextButton(enabled = foreground && !busy, onClick = {
-                    pendingCode = null
-                    lock(chosenCode)
-                }) { Text("Lock chat") }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingCode = null }) { Text("Cancel") }
-            },
-        )
     }
 }

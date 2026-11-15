@@ -61,7 +61,6 @@ fun ResetLockedChatsScreen() {
                         .onSuccess {
                             PrivateChatSession.clear()
                             app.clearPrivateSummary()
-                            app.didResetHiddenChat(option.conversationId.toHex())
                             selected = null
                         }.onFailure { error = "Couldn't reset this chat" }
                     busy = false

@@ -1,6 +1,7 @@
 //! Private MLS persistence. The public mirror is local to the MLS connection so transport storage
 //! never acquires the messages mutex. Locked chats retain only code-protected state and ciphertext
 //! inbox entries; no MLS key capable of reading old traffic remains in readable storage.
+use crate::data::conversation::{Conversation, KIND_DIRECT, KIND_SECRET};
 use crate::state::core;
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -107,6 +108,63 @@ pub(crate) fn install(
     Ok(())
 }
 
+/// Inverse of `install`, for removing a lock. Caller holds the operation lock and an open session.
+/// Startup repair reinstalls the mirror if the messages side never commits.
+pub(crate) fn uninstall(gid: &[u8; 32]) -> Result<()> {
+    let connection = core().db.mls();
+    let mut conn = connection.lock();
+    if metadata(&conn, gid, false)?.is_none() {
+        return Ok(());
+    }
+    ensure!(
+        !conn.query_row("SELECT EXISTS(SELECT 1 FROM mls_private_inbox WHERE group_id=?1)", [gid], |r| r.get::<_, bool>(0))?,
+        "Messages are still arriving. Try again in a moment."
+    );
+    let mut key = Vec::new();
+    ciborium::ser::into_writer(&openmls::prelude::GroupId::from_slice(gid), &mut key)?;
+    let tx = conn.transaction()?;
+    let rows = crate::db::all(
+        &tx,
+        "SELECT key_tag,sub_key,value FROM mls_storage WHERE group_id=?1",
+        [&key],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?)),
+    )?;
+    for (tag, sub, value) in rows {
+        if sealed(&value) {
+            tx.execute(
+                "UPDATE mls_storage SET value=?4 WHERE group_id=?1 AND key_tag=?2 AND sub_key=?3",
+                params![key, tag, sub, open_storage(&tx, &key, &value)?],
+            )?;
+        }
+    }
+    super::recovery::publicize_snapshots(&tx, gid, &key)?;
+    for (table, column) in [("mls_replay", "payload"), ("mls_group_received", "payload"),
+        ("mls_branches", "change_blob"), ("mls_branches", "proof"), ("mls_join_history", "history")] {
+        let rows = crate::db::all(
+            &tx,
+            &format!("SELECT rowid,{column} FROM {table} WHERE group_id=?1 AND length({column})>0"),
+            [gid],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )?;
+        for (row, value) in rows {
+            if sealed(&value) {
+                tx.execute(
+                    &format!("UPDATE {table} SET {column}=?2 WHERE rowid=?1"),
+                    params![row, open_payload(&tx, gid, &value)?],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO mls_group_size(group_id,total_bytes)
+        SELECT ?1,coalesce(sum(length(value)),0) FROM mls_storage WHERE group_id=?1",
+        [&key],
+    )?;
+    tx.execute("DELETE FROM mls_private_conversations WHERE group_id=?1", [gid])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Discard inaccessible history and transport keys together. Caller must hold operation_lock and
 /// arrange a fresh session with the existing contact; never leave encrypted rows under normal
 /// metadata, where the decoder might mistake them for readable state.
@@ -154,9 +212,11 @@ fn envelope_group(envelope: &common::proto::mls_wire::MlsEnvelopeP) -> Option<[u
         _ => None,
     }
 }
-/// Associate a replacement direct session before any Welcome/MLS decrypt can persist keys.
-/// Group variants are deliberately excluded: sharing a peer does not make their other groups
-/// private. Inspect messages first, release that mutex, then acquire the MLS operation lock.
+/// Associate a replacement direct or Secret session before its Welcome can persist keys. Which
+/// one is read from the Welcome's context. An application message for a group we do not know yet
+/// could belong to either, so it waits for its Welcome. Group variants are deliberately excluded:
+/// sharing a peer does not make their other groups private. Inspect messages first, release that
+/// mutex, then acquire the MLS operation lock.
 pub(crate) fn prepare_direct_envelope(
     provider: &super::PromtuzMlsProvider, envelope: &common::proto::mls_wire::MlsEnvelopeP,
     sender: &[u8; 32],
@@ -165,22 +225,32 @@ pub(crate) fn prepare_direct_envelope(
     if !core().db.owns_mls_connection(&provider.storage().connection()) {
         return Ok(());
     }
-    let gid = match envelope {
-        MlsEnvelopeP::Application(e) => e.group_id.0,
-        MlsEnvelopeP::Welcome(e) if e.sender_ipk.0 == *sender => e.group_id.0,
+    let (gid, welcome) = match envelope {
+        MlsEnvelopeP::Welcome(e) if e.sender_ipk.0 == *sender => (e.group_id.0, e),
         _ => return Ok(()),
     };
+    let Some(secret) = super::welcome_is_secret(provider, welcome) else { return Ok(()) };
+    let kind = if secret { KIND_SECRET } else { KIND_DIRECT };
     let _configuration = core().private_configuration.lock();
-    let private: Option<([u8; 16], Vec<u8>, Vec<u8>, Vec<u8>)> = {
+    let lookup = |kind: u8| -> Result<Option<([u8; 16], Vec<u8>, Vec<u8>, Vec<u8>)>> {
         let conn = core().db.messages().lock();
-        conn.query_row("SELECT p.conversation_id,p.public_key,p.salt,p.wrapped_key
+        Ok(conn.query_row("SELECT p.conversation_id,p.public_key,p.salt,p.wrapped_key
             FROM private_conversations p JOIN conversations c ON c.id=p.conversation_id
             JOIN conversation_members m ON m.conversation_id=c.id
-            WHERE c.kind=0 AND m.member_ipk=?1
+            WHERE c.kind=?3 AND m.member_ipk=?1
               AND NOT EXISTS(SELECT 1 FROM conversations other WHERE other.mls_group_id=?2 AND other.id<>c.id)",
-            params![sender,gid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
+            params![sender,gid,kind],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?)
     };
-    if let Some((conv, public, salt, wrapped)) = private {
+    let mut private = lookup(kind)?;
+    // A first Secret chat from someone whose chat is locked here starts under that lock.
+    let mut owner = None;
+    if private.is_none() && secret && Conversation::find_secret(sender).is_none()
+        && crate::data::contact::Contact::is_paired(sender)
+    {
+        private = lookup(KIND_DIRECT)?;
+        owner = private.as_ref().map(|row| row.0);
+    }
+    if let Some((mut conv, public, salt, wrapped)) = private {
         // A relay must not be able to invent replacement private sessions. Authenticate the
         // public envelope before installing metadata or doing an expensive database rewrite.
         let transcript = match envelope {
@@ -212,6 +282,10 @@ pub(crate) fn prepare_direct_envelope(
         };
         common::crypto::verify_ed25519(sender, &transcript, signature)
             .map_err(|_| anyhow::anyhow!("private session envelope signature failed"))?;
+        if let Some(owner) = owner {
+            conv = Conversation::secret_for_peer(sender)?;
+            crate::privacy::link(&conv, &owner)?;
+        }
         let _operation = super::recovery::operation_lock(&gid).lock();
         install(&gid, &conv, &public, &salt, &wrapped)?;
     }
@@ -221,7 +295,7 @@ pub(crate) fn prepare_direct_envelope(
 /// Install protection before creating a replacement outgoing direct session. This must run
 /// before OpenMLS writes its first value, including on a restore with no bound group.
 pub(crate) fn prepare_outgoing_direct(
-    provider: &super::PromtuzMlsProvider, peer: &[u8; 32], gid: &[u8; 32],
+    provider: &super::PromtuzMlsProvider, peer: &[u8; 32], gid: &[u8; 32], kind: u8,
 ) -> Result<()> {
     if !core().db.owns_mls_connection(&provider.storage().connection()) {
         return Ok(());
@@ -233,8 +307,8 @@ pub(crate) fn prepare_outgoing_direct(
             "SELECT p.conversation_id,p.public_key,p.salt,p.wrapped_key
             FROM private_conversations p JOIN conversations c ON c.id=p.conversation_id
             JOIN conversation_members m ON m.conversation_id=c.id
-            WHERE c.kind=0 AND m.member_ipk=?1",
-            [peer],
+            WHERE c.kind=?2 AND m.member_ipk=?1",
+            params![peer, kind],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?
@@ -550,7 +624,7 @@ mod transport_tests {
         // A restored/unbound hidden conversation still protects its very first key write.
         crate::privacy::unlock("transport-code").unwrap();
         let replacement = [124u8; 32];
-        prepare_outgoing_direct(&provider, &bob.ipk, &replacement).unwrap();
+        prepare_outgoing_direct(&provider, &bob.ipk, &replacement, KIND_DIRECT).unwrap();
         let (leaf, credential) = crate::messaging::session::build_self_credential(&signer).unwrap();
         leaf.store(provider.storage()).unwrap();
         let g =
@@ -580,6 +654,54 @@ mod transport_tests {
         crate::api::privacy::lock_private_conversations();
         assert!(crate::mls::MlsGroupHandle::load(&provider,&next_gid).is_err());
 
+    }
+
+    /// Bob's Secret chat must not appear unlocked beside the chat with him that is locked here.
+    #[tokio::test]
+    async fn a_secret_welcome_for_a_locked_chat_arrives_under_its_lock() {
+        use crate::quic::dht_client::DhtClient;
+        let scope = ScopedCore::new();
+        let signer = identity(&scope.core.db.identity().lock(), 131);
+        let ipk = signer.verifying_key().to_bytes();
+        let bob = Device::new(132);
+        let dht = FakeDhtClient::default();
+        Contact::save(bob.ipk, "Bob".into()).unwrap();
+        assert!(Contact::is_paired(&bob.ipk));
+        let direct = Conversation::for_peer(&bob.ipk).unwrap();
+        let provider = super::super::PromtuzMlsProvider::shared();
+        let stash = super::super::KeyPackageStash::new(scope.core.db.mls());
+        let buffer = super::super::EpochCatchupBuffer::new(scope.core.db.mls());
+        let ctx = MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
+        bob.publish_keypackage(&dht).await;
+        let pair = lazy_create_group(&ctx, &ipk, &signer, &bob.ipk).await.unwrap().group_id();
+        Conversation::bind_group(&direct, &pair).unwrap();
+        dht.welcomes_pending.lock().clear();
+        crate::api::privacy::hide_conversation(direct.to_vec(), "shared-lock-code".into()).unwrap();
+        crate::api::privacy::lock_private_conversations();
+
+        dht.publish_keypackages(&[stash.generate_one(&provider, &signer).unwrap()]).await.unwrap();
+        let g = crate::messaging::session::lazy_create_group_paired(&bob.ctx(&dht), &bob.ipk, &bob.signer, &ipk, None, true)
+            .await.unwrap();
+        let gid = g.group_id();
+        drop(g);
+        let welcome = dht.welcomes_pending.lock().pop().unwrap();
+        let bytes = common::proto::mls_wire::MlsEnvelopeP::Welcome(welcome.envelope).ser().unwrap();
+        process_inbound_envelope(&ctx, bob.ipk, &bytes, 1000, [133; 16]).await.unwrap();
+
+        let secret = Conversation::find_secret(&bob.ipk).unwrap();
+        assert!(crate::privacy::is_private(&secret));
+        assert!(crate::mls::MlsGroupHandle::load(&provider, &gid).unwrap().is_none());
+        let raw: Vec<u8> = scope.core.db.mls().lock()
+            .query_row("SELECT envelope FROM mls_private_inbox WHERE group_id=?1", [gid], |r| r.get(0)).unwrap();
+        assert!(sealed(&raw));
+
+        crate::privacy::unlock("shared-lock-code").unwrap();
+        assert!(core().private_sessions.read().contains_key(&secret));
+        drain_with(&ctx, secret).await.unwrap();
+        assert_eq!(Conversation::group_of(&secret), Some(gid));
+        assert_eq!(Conversation::for_peer(&bob.ipk).unwrap(), direct);
+        crate::api::privacy::lock_private_conversations();
+        assert!(crate::mls::MlsGroupHandle::load(&provider, &gid).is_err());
     }
 }
 

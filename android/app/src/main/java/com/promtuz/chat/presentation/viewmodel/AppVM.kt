@@ -51,7 +51,6 @@ class AppVM(
     val messageToShow = _messageToShow.asStateFlow()
 
     fun showMessage(message: com.promtuz.chat.domain.model.MessageLocation) {
-        if (!canOpenChat(message.conversation)) { navigator.push(Routes.Search); return }
         _messageToShow.value = message
         // Reuse the existing chat entry and its scroll/draft state when it is already in the stack.
         val hidden = bridge.privateConversationIds().any { it.contentEquals(message.conversation.fromHex()) }
@@ -165,11 +164,6 @@ class AppVM(
         bridge.privateConversationIds().map { it.toHex() }.toSet()
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
-    var newlyHidden by mutableStateOf<Set<String>>(emptySet())
-        private set
-    fun didHideChat(id: String) { newlyHidden = newlyHidden + id }
-    fun didResetHiddenChat(id: String) { newlyHidden = newlyHidden - id }
-
     private val _privateSummary = MutableStateFlow<ChatSummary?>(null)
     val privateSummary = _privateSummary.asStateFlow()
 
@@ -213,21 +207,25 @@ class AppVM(
     }
 
     fun openChat(conversationHex: String, name: String) {
-        if (!canOpenChat(conversationHex)) {
-            navigator.push(Routes.Search)
-            return
-        }
+        // A locked chat opens to its code screen.
+        if (!canOpenChat(conversationHex)) return navigator.push(Routes.Chat(conversationHex, name))
         val hidden = bridge.privateConversationIds().any { it.contentEquals(conversationHex.fromHex()) }
-        if (hidden && !com.promtuz.chat.security.PrivateChatSession.foreground) {
+        if (hidden && !com.promtuz.chat.security.PrivateChatSession.arm(conversationHex)) {
             com.promtuz.chat.security.PrivateChatSession.clear()
             clearPrivateSummary()
-            navigator.push(Routes.Search)
             return
         }
-        if (hidden) com.promtuz.chat.security.PrivateChatSession.arm(conversationHex)
         navigator.push(Routes.Chat(conversationHex, name,
             sessionId = if (hidden) com.promtuz.chat.security.PrivateChatSession.sessionId else null))
     }
+
+    /** Opens the existing Secret chat, or starts one; [onError] gets the reason it could not. */
+    fun startSecretChat(peerHex: String, name: String, onError: (String) -> Unit) =
+        viewModelScope.launch {
+            runCatching { bridge.startSecretChat(peerHex.fromHex()) }
+                .onSuccess { openChat(it.toHex(), name) }
+                .onFailure { onError(it.reason("Couldn’t start the secret chat")) }
+        }
 
     fun openChatWith(peerHex: String, name: String) = viewModelScope.launch {
         val conv = runCatching { bridge.conversationWith(peerHex.fromHex()) }.getOrNull() ?: return@launch
@@ -241,7 +239,9 @@ class AppVM(
     /** A direct chat forgets the contact too, since half-forgetting one leaves a phantom row.
      *  [onDone] runs only once the chat is really gone. */
     fun deleteChat(summary: ChatSummary, onDone: () -> Unit = {}) = viewModelScope.launch {
-        val result = if (summary.isGroup) {
+        val result = if (summary.isSecret) {
+            runCatching { bridge.deleteSecretChat(summary.conversationHex.fromHex()) }
+        } else if (summary.isGroup) {
             runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
         } else {
             summary.peerHex?.let { runCatching { bridge.forgetContact(it.fromHex()) } }
@@ -358,6 +358,7 @@ class AppVM(
                 commits = c.commits,
                 rawTitle = c.title,
                 request = c.request,
+                locked = c.locked,
             )
         }
     } catch (e: Exception) {

@@ -124,6 +124,10 @@ impl PromtuzStorageProvider {
         Ok(out)
     }
 
+    pub(crate) fn in_operation(&self) -> bool {
+        self.operation_conn().is_some()
+    }
+
     /// The connection of the operation this thread holds open, if it is on
     /// this provider's connection.
     fn operation_conn(&self) -> Option<&Connection> {

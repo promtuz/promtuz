@@ -4,7 +4,6 @@ import com.promtuz.chat.ui.components.TextButton
 import com.promtuz.chat.ui.components.Button
 import com.promtuz.chat.ui.components.AppAlertDialog
 import android.app.Activity
-import android.view.WindowManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -57,8 +56,8 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
     // The typed phrase is the private key, so keep it out of screenshots and recents.
     val window = (context as? Activity)?.window
     DisposableEffect(Unit) {
-        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+        window?.let(com.promtuz.chat.security.SecureRecoveryWindow::acquire)
+        onDispose { window?.let(com.promtuz.chat.security.SecureRecoveryWindow::release) }
     }
 
     SimpleScreen({ Text("Restore your identity") }, connectionStatus = false) { padding ->

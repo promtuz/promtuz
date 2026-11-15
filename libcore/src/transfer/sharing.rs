@@ -57,7 +57,7 @@ pub(super) fn serving_scope(c: &Core) -> Option<CancellationToken> {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Grant {
+pub(crate) struct Grant {
     pub id: [u8; 32],
     pub conversation: [u8; 16],
     pub group: [u8; 32],
@@ -139,6 +139,19 @@ fn insert(conn: &Connection, grant: &Grant) -> Result<()> {
             size, grant.offer.expires_at, recipients,
             grant.control_id.as_ref().map(|id| id.as_slice())],
     )?;
+    Ok(())
+}
+
+pub(crate) fn snapshot_tx(conn: &Connection, conversation: &[u8;16]) -> Result<Vec<Grant>> {
+    Ok(crate::db::all(conn,"SELECT * FROM attachment_sharing WHERE conversation_id=?1",[conversation],Grant::from_row)?)
+}
+/// Writes grants read by `snapshot_tx` back in the clear once their chat is no longer private.
+pub(crate) fn restore_tx(conn: &Connection, grants: &[Grant]) -> Result<()> {
+    for grant in grants {
+        conn.execute("UPDATE attachment_sharing SET file_id=?2,size=?3,recipients=?4 WHERE grant_id=?1",
+            params![grant.id.as_slice(), grant.offer.file_id.as_slice(), grant.offer.size,
+                postcard::to_allocvec(&grant.offer.recipients)?])?;
+    }
     Ok(())
 }
 

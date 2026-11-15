@@ -89,6 +89,8 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
         access = context.galleryAccess(perms)
         reload++
     }
+    // The permission dialog pauses the activity, which would otherwise lock a private chat.
+    val requestAccess = { com.promtuz.chat.security.PrivateChatSession.beginHandoff(); launcher.launch(perms) }
 
     if (!hasAccess) {
         Column(
@@ -96,7 +98,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
         ) {
-            Button(onClick = { launcher.launch(perms) }) { Text("Allow photo access") }
+            Button(onClick = requestAccess) { Text("Allow photo access") }
             TextButton(onClick = onOpenSystemPicker) { Text("Open gallery") }
         }
         return
@@ -125,7 +127,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
         // Partial access already scopes the query; this re-opens the system chooser to add more.
         if (partial) {
             TextButton(
-                onClick = { launcher.launch(perms) },
+                onClick = requestAccess,
                 modifier = Modifier.align(Alignment.TopEnd).padding(10.dp),
             ) { Text("Select more") }
         }

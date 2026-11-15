@@ -33,9 +33,16 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     }.collectAsState(null)
     val chats by app.chats.collectAsState()
     val privateIds by app.privateIds.collectAsState()
-    val hidden = conversation != null && conversation in privateIds
-    var resetting by remember { mutableStateOf(false) }
-    val chat = chats.firstOrNull { !it.isGroup && (it.conversationHex == conversation || it.peerHex == peer) }
+    val privateSummary by app.privateSummary.collectAsState()
+    // A Secret chat's info is its own; anywhere else it is the normal chat's.
+    val chat = chats.firstOrNull { it.conversationHex == conversation }
+        ?: privateSummary?.takeIf { it.conversationHex == conversation }
+        ?: chats.firstOrNull { it.kind == 0 && it.peerHex == peer }
+    val hidden = chat != null && chat.conversationHex in privateIds
+    val secret = chats.firstOrNull { it.isSecret && it.peerHex == peer }
+    val canSecret = chat?.kind == 0 && chat.status == 1 && !chat.request
+    var removingLock by remember { mutableStateOf(false) }
+    var starting by remember { mutableStateOf(false) }
     val directConversation = chat?.conversationHex ?: conversation
     val picture = rememberAvatar(peer)
     val name = profile?.nickname?.ifBlank { profile?.name.orEmpty() }?.ifBlank { chat?.name.orEmpty() }
@@ -48,7 +55,6 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     val mediaCount by remember(directConversation) {
         observeQuery(setOf("messages", "message_media", "private_conversations")) {
             directConversation?.let {
-                // A locked hidden contact still has a usable profile/reset screen.
                 runCatching {
                     val id = it.fromHex()
                     val private = CoreBridge.privateConversationIds().any { candidate -> candidate.contentEquals(id) }
@@ -65,7 +71,6 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     }, actions = {
         AppDropMenu(anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Contact options") }, groups = buildList {
             if (profile?.canShare == true) add(listOf(MenuAction("Share contact", R.drawable.oi_export) { app.navigator.push(Routes.ContactCard(peer, profile?.name.orEmpty(), true)) }))
-            if (hidden) add(listOf(MenuAction("Reset locked chat", R.drawable.oi_broom, destructive = true) { resetting = true }))
             if (BuildConfig.DEBUG && !hidden) add(listOf(MenuAction("Debug info", R.drawable.oi_info) {
                 scope.launch {
                     debug = runCatching { CoreBridge.contactsDiag().firstOrNull { it.ipk.contentEquals(peer.fromHex()) }?.let {
@@ -73,7 +78,19 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                     } }.getOrNull() ?: "No diagnostics available"
                 }
             }))
-            if (chat != null) add(listOf(MenuAction("Delete contact", R.drawable.oi_trash, destructive = true) { deleting = true }))
+            if (chat != null && !chat.request) add(buildList {
+                if (hidden) add(MenuAction("Remove lock", R.drawable.oi_lock_chat_open) { removingLock = true })
+                else add(MenuAction("Lock chat", R.drawable.oi_lock_chat) { app.navigator.push(Routes.LockChat(chat.conversationHex)) })
+                if (canSecret) add(MenuAction(if (secret != null) "Open secret chat" else "Start secret chat", iconPlaceholder = "secret") {
+                    if (secret != null) app.openChat(secret.conversationHex, secret.name)
+                    else if (!starting) {
+                        starting = true
+                        error = null
+                        app.startSecretChat(peer, name) { starting = false; error = it }
+                    }
+                })
+            })
+            if (chat != null && !chat.isSecret) add(listOf(MenuAction("Delete contact", R.drawable.oi_trash, destructive = true) { deleting = true }))
         })
     }) { padding ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 18.dp, end = 18.dp,
@@ -87,7 +104,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
             }
             // Their side receives it as a message request.
             if (chat == null) item {
-                Button(onClick = { if (hidden) app.navigator.push(Routes.Search) else app.openChatWith(peer, name) }) { Text(if (hidden) "Open search" else "Message") }
+                Button(onClick = { app.openChatWith(peer, name) }) { Text("Message") }
             }
             if (chat != null) item {
                 Button(onClick = { app.openChat(chat.conversationHex, name) }) { Text("Message") }
@@ -108,17 +125,6 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
             error?.let { item { Text(it, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error) } }
         }
     }
-    if (resetting && conversation != null) AppAlertDialog(
-        onDismissRequest = { if (!busy) resetting = false }, title = { Text("Reset locked chat?") },
-        text = { Column { Text("This permanently deletes the locked history without recovering it. The contact stays, and you can start a fresh chat.")
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) } } },
-        confirmButton = { TextButton(enabled = !busy, onClick = { busy = true; scope.launch {
-            runCatching { CoreBridge.resetPrivateConversation(conversation.fromHex()) }
-                .onSuccess { resetting = false; app.didResetHiddenChat(conversation); com.promtuz.chat.security.PrivateChatSession.clear(); app.clearPrivateSummary(); app.navigator.reset(Routes.App) }
-                .onFailure { error = "Couldn't reset this chat" }
-            busy = false
-        } }) { Text("Delete history", color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(enabled = !busy, onClick = { resetting = false }) { Text("Cancel") } })
     nickname?.let { draft -> AppAlertDialog(onDismissRequest = { if (!busy) nickname = null }, title = { Text("Nickname") },
         text = { Column {
             AppTextField(draft, { if (it.length <= 32) nickname = it }, singleLine = true, enabled = !busy,
@@ -138,4 +144,5 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
         dismissButton = { TextButton(onClick = { deleting = false }) { Text("Cancel") } })
     debug?.let { AppAlertDialog(onDismissRequest = { debug = null }, title = { Text("Debug info") }, text = { Text(it) },
         confirmButton = { TextButton(onClick = { debug = null }) { Text("Close") } }) }
+    if (removingLock && chat != null) RemoveLockDialog(app, chat.conversationHex, chat.name) { removingLock = false }
 }

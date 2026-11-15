@@ -52,20 +52,40 @@ fun AppNavigation(
             }
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
+                val session = com.promtuz.chat.security.PrivateChatSession
+                val active by session.active.collectAsState()
+                session.revision.collectAsState().value
+                // Process-local: a restored entry never carries a session, so it asks for the code again.
+                var opened by remember(key) { mutableStateOf(key.sessionId) }
                 val hidden = com.promtuz.core.CoreBridge.privateConversationIds().any {
                     it.contentEquals(key.conversation.fromHex())
                 }
-                val session = com.promtuz.chat.security.PrivateChatSession
-                if (!appViewModel.canOpenChat(key.conversation) ||
-                    (hidden && (session.active.value != key.conversation || key.sessionId == null || key.sessionId != session.sessionId))) {
-                    LaunchedEffect(key) { appViewModel.navigator.reset(Routes.App) }
-                    return@entry
+                val locked = hidden && (!appViewModel.canOpenChat(key.conversation) || active != key.conversation ||
+                        opened == null || opened != session.sessionId)
+                androidx.compose.foundation.layout.Box {
+                    if (!locked) {
+                        val chatVM = koinViewModel<ChatVM>(parameters = { parametersOf(key.conversation) })
+                        LaunchedEffect(key.conversation) {
+                            chatVM.init()
+                        }
+                        ChatScreen(key.name, chatVM)
+                    }
+                    // The fade waits for the chat's first, slow frame so it isn't swallowed by it.
+                    var covering by remember(key) { mutableStateOf(locked) }
+                    LaunchedEffect(locked) {
+                        if (!locked) { withFrameNanos {}; withFrameNanos {} }
+                        covering = locked
+                    }
+                    // Locking again covers the chat at once.
+                    androidx.compose.animation.AnimatedVisibility(
+                        locked || covering,
+                        enter = androidx.compose.animation.EnterTransition.None,
+                        exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(420,
+                            easing = androidx.compose.animation.core.EaseOutQuint)),
+                    ) {
+                        com.promtuz.chat.ui.screens.LockedChatGate(appViewModel, key.conversation, key.name) { opened = it }
+                    }
                 }
-                val chatVM = koinViewModel<ChatVM>(parameters = { parametersOf(key.conversation) })
-                LaunchedEffect(key.conversation) {
-                    chatVM.init()
-                }
-                ChatScreen(key.name, chatVM)
             }
             entry<Routes.ContactCard> { key -> ContactCardScreen(key) }
             entry<Routes.MessageRequests> { MessageRequestsScreen() }
@@ -107,7 +127,6 @@ fun AppNavigation(
                     conversation = key.conversation,
                     onBack = { if (backStack.lastOrNull() == key) backStack.removeLastOrNull() },
                     onLocked = {
-                        appViewModel.didHideChat(key.conversation)
                         appViewModel.clearPrivateSummary()
                         appViewModel.navigator.reset(Routes.App)
                     },

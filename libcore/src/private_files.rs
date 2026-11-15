@@ -305,6 +305,31 @@ pub(crate) fn cleanup_plaintext_tx(conn:&Connection)->Result<()> {
     Ok(())
 }
 
+/// Copies a chat's private files to ordinary storage before its lock is removed, and returns the
+/// encrypted paths to delete once the removal commits. Until then startup cleanup drops the copies.
+pub(crate) fn publish_conversation(conversation:&[u8;16])->Result<Vec<String>> {
+    let rows:Vec<([u8;32],String,Vec<u8>)>=crate::db::all(&core().db.messages().lock(),
+        "SELECT file_id,path,details FROM private_files WHERE conversation_id=?1",[conversation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    let mut paths=Vec::new();
+    for (file,path,sealed) in rows {
+        paths.push(path.clone());
+        let transfers=core().db.transfers();
+        transfers.lock().execute("DELETE FROM partials WHERE path=?1",[&path])?;
+        if crate::transfer::store::retention_get(&file).is_some_and(|r|r.path!=path && !is_private_path(&r.path).unwrap_or(true)) {continue}
+        let plain=Zeroizing::new(crate::privacy::open_bytes(conversation,&sealed)?);
+        let details:Details=postcard::from_bytes(&plain)?;
+        let chunk_size=postcard::from_bytes::<crate::transfer::wire::Manifest>(&details.manifest).map(|m|m.chunk_size).unwrap_or(crate::transfer::wire::CHUNK_SIZE as u32);
+        let mut source=StorageFile::open(&path,false)?;
+        let target=format!("{}/{}.src",core().db.files_dir("transfers"),hex::encode(file));
+        let candidate=format!("{target}.{}",hex::encode(random::<8>()));
+        let result:Result<()>=(|| {let mut out=File::options().write(true).create_new(true).open(&candidate)?;io::copy(&mut source,&mut out)?;out.sync_data()?;std::fs::rename(&candidate,&target)?;
+            crate::transfer::store::retention_put_tx(&transfers.lock(),&file,&target,details.size,chunk_size,&details.manifest,details.expires_at)?;Ok(())})();
+        if result.is_err(){let _=std::fs::remove_file(&candidate);}
+        result?;
+    }
+    Ok(paths)
+}
+
 /// Commits ordinary composer bytes to ordinary storage; private commits use protect_tx instead.
 pub(crate) fn publish_ordinary(file:&[u8;32])->Result<()> {
     let Some(ret)=crate::transfer::store::retention_get(file) else{return Ok(())};

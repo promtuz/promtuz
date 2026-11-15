@@ -63,10 +63,10 @@ fun HomeSearchScreen(app: AppVM) {
             unlockMutex.withLock {
                 if (currentQuery != expected || !currentForeground || !PrivateChatSession.foreground) return@withLock
                 val epoch = PrivateChatSession.generation
-                val id = runCatching { CoreBridge.unlockPrivateConversation(expected) }.getOrNull()
+                val id = runCatching { CoreBridge.unlockPrivateConversation(expected, epoch) }.getOrNull()
                 if (id != null) {
-                    if (currentQuery == expected && currentForeground && PrivateChatSession.foreground && PrivateChatSession.generation == epoch) {
-                        PrivateChatSession.arm(id.toHex())
+                    if (currentQuery == expected && currentForeground && PrivateChatSession.generation == epoch &&
+                        PrivateChatSession.arm(id.toHex())) {
                         revealedId = id.toHex()
                         if (currentQuery != expected || !currentForeground || !PrivateChatSession.foreground || PrivateChatSession.generation != epoch) {
                             revealed = null
@@ -104,9 +104,8 @@ fun HomeSearchScreen(app: AppVM) {
             }
         }
     }
-    val ordinary = remember(chats, query, app.newlyHidden) {
-        val visible = chats.filterNot { it.conversationHex in app.newlyHidden }
-        if (query.isBlank()) visible else visible.filter {
+    val ordinary = remember(chats, query) {
+        if (query.isBlank()) chats else chats.filter {
             it.name.contains(query, ignoreCase = true) || it.lastPreview.orEmpty().contains(query, ignoreCase = true)
         }
     }
@@ -134,7 +133,7 @@ fun HomeSearchScreen(app: AppVM) {
                 }
                 items(results, key = { it.conversationHex }) { chat ->
                     HomeChatListItem(chat, presence = null, typing = false, pinned = chat.pinned,
-                        muted = chat.muted, menuState = menu, privateChat = chat.conversationHex == privateResult?.conversationHex,
+                        muted = chat.muted && !chat.locked, menuState = menu, privateChat = chat.conversationHex == privateResult?.conversationHex,
                         onOpen = {
                             if (chat.conversationHex != privateResult?.conversationHex) {
                                 PrivateChatSession.clear()

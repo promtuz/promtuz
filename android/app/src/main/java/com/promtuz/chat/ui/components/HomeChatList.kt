@@ -62,8 +62,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
         }
     }
     val all by appViewModel.chats.collectAsState()
-    val justHidden = appViewModel.newlyHidden
-    val chats = androidx.compose.runtime.remember(all, justHidden) { all.filterNot { it.request || it.conversationHex in justHidden } }
+    val chats = androidx.compose.runtime.remember(all) { all.filterNot { it.request } }
     val requests = androidx.compose.runtime.remember(all) { all.filter { it.request } }
     val pins = remember(chats) { chats.associate { it.conversationHex to it.pinned } }
     var previousPins by remember { mutableStateOf(pins) }
@@ -104,7 +103,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
                 typing = Activity.Typing in
                     Activity.fromBits(activity[chat.conversationHex] ?: 0),
                 pinned = chat.pinned,
-                muted = chat.muted,
+                muted = chat.muted && !chat.locked,
                 menuState = menuState,
                 onOpen = { appViewModel.openChat(chat.conversationHex, chat.name) },
                 onPin = { ChatPrefs.togglePin(chat.conversationHex, !chat.pinned) },

@@ -205,6 +205,25 @@ pub(crate) fn privatize_tx(conn: &rusqlite::Connection, conv: &[u8;16]) -> Resul
     Ok(())
 }
 
+/// Media decoded while its chat is still private, for writing back once it is not.
+pub(crate) struct Snapshot { rows: Vec<([u8;16], MediaRow)>, preparing: Vec<([u8;16], Vec<u8>)> }
+pub(crate) fn snapshot_tx(conn: &rusqlite::Connection, conv: &[u8;16]) -> Result<Snapshot> {
+    let rows = all(conn, "SELECT * FROM message_media WHERE conversation_id=?1", [conv],
+        |r| Ok((r.get::<_,[u8;16]>("dispatch_id")?, MediaRow::from_row(r)?)))?;
+    let preparing = all(conn,"SELECT dispatch_id,details FROM message_media_preparations WHERE conversation_id=?1",[conv],
+        |r|Ok((r.get::<_,[u8;16]>(0)?,r.get::<_,Vec<u8>>(1)?)))?
+        .into_iter().map(|(did,details)| Ok((did, crate::privacy::open_if_sealed(conv,&details)?))).collect::<Result<_>>()?;
+    Ok(Snapshot { rows, preparing })
+}
+pub(crate) fn restore_tx(conn: &rusqlite::Connection, conv: &[u8;16], snapshot: Snapshot) -> Result<()> {
+    for (did, row) in &snapshot.rows { save_tx(conn, conv, did, row)?; }
+    for (did, details) in snapshot.preparing {
+        conn.execute("UPDATE message_media_preparations SET details=?3 WHERE conversation_id=?1 AND dispatch_id=?2",
+            (conv.as_slice(),did.as_slice(),details))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn row_file_ids(row:&MediaRow)->Vec<[u8;32]> {
     row.file_id.as_deref().and_then(|id|id.try_into().ok()).into_iter().chain(row.hd.as_ref().map(|hd|hd.file_id)).collect()
 }

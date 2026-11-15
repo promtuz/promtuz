@@ -94,14 +94,14 @@ fun HomeChatListItem(
         MenuAction("Delete", R.drawable.oi_trash, destructive = true) { confirmRequest = RequestDecision.Delete },
     )) else listOf(
         buildList {
-            if (!privateChat) add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_unpin else R.drawable.oi_pin) { onPin() })
-            if (!privateChat) add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
+            if (!privateChat && !chat.locked) add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_unpin else R.drawable.oi_pin) { onPin() })
+            if (!privateChat && !chat.locked) add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
             if (unread) add(MenuAction("Mark read", R.drawable.oi_message_check) { onMarkRead() })
         },
-        listOf(
-            MenuAction("Clear history", R.drawable.oi_broom) { confirmClear = true },
-            MenuAction("Delete chat", R.drawable.oi_trash, destructive = true) { confirmDelete = true },
-        ),
+        buildList {
+            if (!chat.locked) add(MenuAction("Clear history", R.drawable.oi_broom) { confirmClear = true })
+            add(MenuAction("Delete chat", R.drawable.oi_trash, destructive = true) { confirmDelete = true })
+        },
     )
 
     Box(modifier) {
@@ -171,8 +171,13 @@ fun HomeChatListItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    // [secret] placeholder until the glyph exists; same slot, size and tint as the others.
+                    if (chat.isSecret) Text("[secret]", style = MaterialTheme.typography.labelSmall, color = c.muted)
                     if (privateChat) DrawableIcon(
                         R.drawable.oi_lock_chat_open, size = 15.dp, desc = "Unlocked chat",
+                        tint = c.muted,
+                    ) else if (chat.locked) DrawableIcon(
+                        R.drawable.oi_lock_chat, size = 15.dp, desc = "Locked chat",
                         tint = c.muted,
                     )
                     if (muted) DrawableIcon(
@@ -258,6 +263,7 @@ private val HomePreviewStyle = TextStyle(fontSize = 14.5.sp, lineHeight = 20.sp)
 
 private fun statusLine(chat: ChatSummary, typing: Boolean, c: PromtuzColors): Pair<String, Color> = when {
     typing -> "typing…" to c.accent
+    chat.locked -> "Locked chat" to c.muted
     chat.status == 0 && chat.lastMessageId == null -> "Waiting to connect…" to c.accent
     chat.status == 2 -> declineText(chat.rejectReason) to c.danger
     chat.lastDeleted -> "deleted message" to c.muted
@@ -365,6 +371,9 @@ fun DeleteChatDialog(
         text = {
             Text(
                 when {
+                    chat.isSecret ->
+                        "This deletes the secret chat and its messages from this device. " +
+                            "${chat.name} will see that you deleted it. This can't be undone."
                     !chat.isGroup ->
                         "Delete your chat with ${chat.name}? This removes the contact and " +
                             "all messages on this device. This can't be undone."

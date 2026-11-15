@@ -26,7 +26,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.semantics.semantics
@@ -61,7 +64,6 @@ import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import com.promtuz.chat.utils.media.rememberAvatar
-import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.pictureItem
 
@@ -178,6 +180,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 }
                 ChatBarTitle(
                     name = name,
+                    secret = summary?.isSecret == true,
                     subtitle = subtitle,
                     subtitleColor = subtitleColor,
                     animateChanges = headerReady,
@@ -202,8 +205,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                             chatVM.toggleMute()
                         })
                     })
-                    if (!hidden && summary?.request != true)
-                        add(listOf(MenuAction("Lock Chat", R.drawable.oi_lock_chat) { appVM.navigator.push(Routes.LockChat(chatVM.conversationHex)) }))
                     add(
                         buildList {
                             add(
@@ -258,12 +259,18 @@ internal fun ChatBarTitle(
     subtitle: String?,
     subtitleColor: Color,
     modifier: Modifier = Modifier,
+    secret: Boolean = false,
     animateChanges: Boolean = true,
     onClick: (() -> Unit)? = null,
 ) {
     Column(modifier.then(if (onClick != null) Modifier.pressScale(onClick, 0.96f) else Modifier)) {
-        Text(name, style = MaterialTheme.typography.titleMediumEmphasized,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMediumEmphasized,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // [secret] placeholder until the glyph exists.
+            if (secret) Text("[secret]", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         // Keep the queue mounted through absence. The empty target has zero height,
         // so its size transition recenters the name without interrupting a subtitle.
         val subtitleContent: @Composable (String?) -> Unit = { value ->

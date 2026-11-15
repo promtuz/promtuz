@@ -18,10 +18,10 @@ pub fn hide_conversation(conversation_id: Vec<u8>, code: String) -> Result<(), C
     Ok(())
 }
 #[uniffi::export]
-pub fn unlock_private_conversation(code: String) -> Result<Option<Vec<u8>>, CoreError> {
+pub fn unlock_private_conversation(code: String, generation: u64) -> Result<Option<Vec<u8>>, CoreError> {
     let code = Zeroizing::new(code);
-    let conversation = crate::privacy::unlock(&code)?;
-    if let Some(conv) = conversation {
+    let conversation = crate::privacy::unlock_at(&code, generation)?;
+    for conv in conversation.map(|c| crate::privacy::linked(&c)).transpose()?.unwrap_or_default() {
         core().spawn(async move {
             if let Err(error) = crate::mls::privacy::drain(conv).await {
                 log::warn!("PRIVATE: buffered inbox remains pending: {error:#}");
@@ -29,6 +29,17 @@ pub fn unlock_private_conversation(code: String) -> Result<Option<Vec<u8>>, Core
         });
     }
     Ok(conversation.map(|c| c.to_vec()))
+}
+/// Read before deciding to unlock; any lock or cancel since then refuses the unlock.
+#[uniffi::export]
+pub fn private_generation() -> u64 {
+    core().private_generation.load(std::sync::atomic::Ordering::SeqCst)
+}
+/// Refuses unlocks already in flight without closing an open chat.
+#[uniffi::export]
+pub fn cancel_private_unlocks() {
+    let _sessions = core().private_sessions.write();
+    core().private_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 #[uniffi::export]
 pub fn lock_private_conversations() {
@@ -40,11 +51,22 @@ pub fn lock_private_conversations() {
     crate::staging::lock_private();
 }
 #[uniffi::export]
+pub fn remove_conversation_lock(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::remove_lock(&conv)?;
+    Ok(())
+}
+#[uniffi::export]
 pub fn private_conversation_ids() -> Result<Vec<Vec<u8>>, CoreError> {
     Ok(crate::privacy::ids_tx(&core().db.messages().lock())?
         .into_iter()
         .map(|c| c.to_vec())
         .collect())
+}
+/// Whether the chat's code is a 6-digit PIN, so the code screen can show a keypad while locked.
+#[uniffi::export]
+pub fn private_code_is_pin(conversation_id: Vec<u8>) -> bool {
+    fixed::<16>(&conversation_id, "conversation id").is_ok_and(|conv| crate::privacy::uses_pin(&conv))
 }
 #[uniffi::export]
 pub fn is_private_conversation_unlocked(conversation_id: Vec<u8>) -> bool {
