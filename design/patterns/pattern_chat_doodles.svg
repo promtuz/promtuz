@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640"
+     fill="none" stroke="#000" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" overflow="hidden">
+  <defs>
+    <g id="sleeping-cat"><path d="M-29 14C-47-3-32-30-10-29C13-29 38-12 32 10C27 28 0 31-9 17C-19 2-1-12 10-3C22 7 10 23-1 14M-28 12L-37-4L-36-20L-24-15Q-14-20-5-14L5-19L3-4C10 10-11 20-28 12Z"/> <path d="M-28-4Q-24 1-19-3M-12-3Q-8 2-4-2M-18 4L-15 5L-16 8M-33 1L-43-1M-31 5L-42 8M-3 4L6 3M-4 8L7 11M11-22L8-15M18-18L15-10M24-13L21-6M-24 21Q-31 27-40 22"/></g>
+    <g id="cloud-friend"><path d="M-29 15C-48 13-47-8-32-11C-35-30-10-36 0-22C13-38 38-25 32-8C50-1 45 21 28 21C19 36-5 32-13 22Q-24 27-29 15Z"/> <path d="M-15-3l.2 1M7-5l.2 1M-9 7Q0 17 10 5M-24 27L-25 36L-33 35M19 27L24 35L30 31M-40 0L-50-6L-48-13M40 4L49-1L50-8M-21-12Q-17-19-10-17"/></g>
+    <g id="snail"><path d="M-37 19C-17 24 17 24 29 13L31-6Q31-13 35-11L37-1L43-10Q47-14 48-8L44 5C53 18 30 31 13 30L-32 29Q-47 27-37 19ZM-17 21C-42 8-33-24-10-25C15-27 31-5 19 13C8 31-20 20-22 4C-24-13 1-20 8-5C14 8-1 17-8 7Q-13 0-5-4"/> <path d="M34-6l.1 1M44-5l.1 1M36 12Q39 16 44 10M-13-25L-14-42L4-37L-13-32M-25 26L-22 22M-17 28L-14 24M-8 29L-6 25"/></g>
+    <g id="whale"><path d="M-38 7C-36-20-3-29 18-17C29-10 32 1 31 9Q44 12 48 1Q54 21 34 25C17 40-15 37-32 23Q-39 18-38 7ZM-15 21Q-2 17 4 25Q-7 29-15 21Z"/> <path d="M-25-1l.1 1M-29 12Q-21 20-12 11M-4-23Q-13-39-23-31Q-24-25-13-23M-4-23Q-2-42 10-37Q17-31 5-27M20 18L17 25M25 17L22 26M-35 36Q-25 32-14 36T10 37"/></g>
+    <g id="rocket"><path d="M-17 18C-24-2-19-33-2-45C17-33 23-10 17 16L7 27L-8 26ZM-17-2Q-33 4-31 25L-17 17M17-3Q32 5 30 25L17 17M-7 27Q-12 42-2 46Q9 37 6 27M-16-22Q-1-15 17-22"/> <path d="M-11 8Q2 14 15 8M-9 14L-7 20M-3 16L-1 22M4 16L6 21M-16 32Q-31 41-24 50Q-14 60-28 64M14 34Q29 47 19 53"/> <path d="M-8-6C-11-20 10-21 10-7C12 7-7 8-8-6ZM-3-12L0-14"/></g>
+    <g id="teapot"><path d="M-27 5C-28-10-12-16 6-12C28-9 37 18 19 29C6 39-26 31-27 5ZM-26 0L-42-11L-41-21Q-30-17-18-9M27-3C50-15 53 19 30 19M-14-12L-18-18Q-9-26 8-20L12-12M-5-22Q-14-32-5-35Q5-36 1-24M-22 28L-23 34M17 31L20 35"/> <path d="M-9 5l.1 1M10 7l.1 1M-6 15Q1 22 8 15M-35-29C-46-38-28-40-34-49M-21-31C-29-42-13-42-19-51M-18 1Q-22 12-16 20M-11 27L-8 23M-3 29L0 25"/></g>
+    <g id="frog"><path d="M-26 2C-39-10-29-30-13-25Q-5-23-4-15Q2-31 18-27C34-22 35-5 24 3C37 22 23 37 5 31C-9 39-36 29-26 2ZM-26 2Q-5 13 24 3M-17 9Q-28 19-21 26L-9 25M17 11Q27 20 21 27L9 26"/> <path d="M-21-16l.1 2M15-17l.1 2M-13-2Q-2 5 10-3M-27 28L-35 31M-22 30L-28 35M25 28L32 31M20 31L24 36M-7 18L-4 22L2 18M-37 40Q-17 35 1 39T35 39"/></g>
+    <g id="cat-mug"><path d="M-25-4Q-30-14-27-27L-17-21Q-5-29 8-21L19-27L18-9Q20 0 14 6M-24-4Q-6-1 20-5L17 29Q13 39-5 37Q-22 36-23 27ZM20 2C47-7 43 26 19 24M-23 8Q-7 12 18 6"/> <path d="M-20-13Q-16-9-12-13M1-13Q5-9 9-13M-8-8L-5-6L-7-3M-26-10L-35-11M-26-6L-36-3M15-12L26-15M15-7L27-6M-12 19Q-5 14 0 21Q7 13 11 21Q14 27 1 31Q-10 28-12 19M-13-35C-22-43-10-46-13-52M2-36C-5-44 6-46 3-53"/></g>
+    <g id="winged-book"><path d="M-1-16C-13-25-29-21-30-16L-28 21Q-14 14-1 24Q11 14 28 19L29-18C17-25 5-22-1-16ZM-1-16L-1 24M-30-5C-47-25-62-14-48-1Q-62-4-54 10Q-46 18-29 10M29-5C46-27 62-12 48-1Q63-4 54 10Q44 18 28 10"/> <path d="M-22-10Q-15-13-7-8M-21-2Q-13-5-7 0M-20 6Q-13 3-7 8M6-10Q14-15 22-10M6-1Q14-6 21-2M7 7Q14 2 21 6M-45-7L-33 1M44-7L32 2M-23 22L-20 27L-15 24M6 23L10 29L14 24"/></g>
+    <g id="message-bottle"><path d="M-10-29L-9-47L8-46L7-29C8-22 23-19 24-9L21 32Q20 42-2 42Q-26 42-27 31L-26-8C-25-19-11-22-10-29ZM-9-38L8-37M-13-28Q-1-24 12-28M-22 25Q-3 31 20 25M-18-13Q-24-2-20 10"/> <path d="M-10-45L-11-54L10-53L8-45M-8-8L10-11L13 17L-4 20ZM-5-2L6-4M-4 4L7 2M-3 10L5 9M-13-24Q-18-11-29-16Q-38-22-28-27Q-20-31-15-20M-14-23Q-7-10-6-4"/></g>
+    <g id="moon-friend"><path d="M19-34C-23-43-51 6-20 31C-3 45 25 40 38 18C6 28-13 1 0-22Q8-32 19-34Z"/> <path d="M-22-3Q-16 3-10-2M-18 11Q-11 18-3 12M-27 4L-31 3M-10 28L-7 24M-1 31L2 26M9 31L11 26M7-5L16-8L21-18L25-8L36-7L29 1L31 12L21 7L11 12L13 1Z"/></g>
+    <g id="bird-letter"><path d="M-16 19C-35 7-30-13-14-17C-13-37 12-34 18-17L32-13L20-6C25 10 9 29-9 23L-26 32L-23 18M-10-3Q-1-17 11-8Q12 2-4 9M11-21l.1 1M-21-8L-32-16L-30-3M1 22L0 31M8 22L10 29"/> <path d="M28-12L40 3L25 15L12 0ZM27-10L28 3L39 3M24 14L27 6M-20 2L-16 7M-23 6L-19 11"/></g>
+    <g id="little-bird"><path d="M-22 10C-27-5-15-17-4-12C4-25 25-16 18-3L28 1L17 6C13 21-8 26-18 17L-31 22L-26 10M-7 2Q3-8 11 0Q8 12-3 10M12-10l.1 1M-10 22L-11 28M0 22L2 27"/></g>
+    <g id="open-book"><path d="M0-10C-8-17-22-13-23-9L-21 19Q-8 14 0 22Q10 14 25 18L23-12Q10-17 0-10ZM0-10V22M-16-5Q-10-7-5-3M-15 3Q-9 0-4 5M5-4Q12-9 18-5M5 4Q12 0 18 4"/></g>
+    <g id="planet"><path d="M-28 4C-33-15-18-32 1-30C22-30 34-11 28 8M25 16C10 36-17 31-26 13M-27-5C-52 0-53 15-29 16C-5 18 35 1 43-10Q49-24 23-18M-46 6C-24 16 18-3 37-15M-12-17Q-17-23-21-16Q-22-10-15-10Q-10-11-12-17M11 17Q18 12 20 18M5-21L10-23"/> <path d="M-2 5l.1 1M11-1l.1 1M1 13Q7 17 12 9M-35 27L-40 31M-38-26L-42-30"/></g>
+    <g id="sun"><path d="M-20 0C-23-25 17-29 23-5C30 20-13 30-20 0ZM-9-4l.1 1M9-5l.1 1M-8 7Q3 18 13 5M-2-32L-4-42M15-30L20-39M29-18L39-23M34 1L45 1M28 21L37 28M10 31L12 42M-10 32L-14 42M-29 22L-38 28M-32 2L-43 4M-29-18L-38-25M-21-30L-27-39"/></g>
+    <g id="umbrella"><path d="M-38-1C-28-43 29-45 40-5Q25-14 15-2Q1-14-10-1Q-25-12-38-1ZM-2-34L1-44M-2-34C-14-26-17-15-10-1M-2-34Q15-24 15-2M1-8L3 32Q3 46-9 43Q-17 40-13 33M-42 12Q-49 18-44 23Q-38 23-42 12ZM30 18Q22 24 28 28Q35 28 30 18Z"/> <path d="M-26-15L-22-21M-20-12L-16-18M26-14L30-19"/></g>
+    <g id="little-house"><path d="M-30-5L-26 33L29 29L28-10M-40-2L-5-40L39-10L33-3L-5-29L-33 4ZM9-30L9-42L20-43L22-22M-10 31L-12 8L4 7L6 31M-3 20l.1 1M12 0L24-1L25 11L13 12ZM18 0L19 11M12 5L24 5M-24 19L-20 18M-23 24L-19 23M-33 38Q-8 43 35 36"/> <path d="M-22-5L-17-10M-17-3L-12-8M31-39C43-49 29-48 35-58"/></g>
+    <g id="mushrooms"><path d="M-40-1C-38-23-4-38 8-11Q10-7 5-5Q-15-2-40-1ZM-28 0L-30 29Q-16 36-7 27L-10-3M8 12C14-12 39-16 47 8Q30 17 8 12ZM23 15L25 33Q33 39 39 30L36 13M-33 35Q-9 41 10 34M14 39Q29 44 48 38"/> <path d="M-28-13Q-32-18-25-19Q-18-16-22-12ZM-9-20Q-15-26-17-18M28-1Q20-6 18 2M35 5l.1 1M-22 10l.1 1M-13 11l.1 1M-21 19Q-17 23-12 18M29 23l.1 1M34 22l.1 1"/></g>
+    <g id="flower-boot"><path d="M-18-3L-20 26L-32 29Q-42 30-40 40L18 40Q27 39 24 29L12 23L14-4ZM-17 4L13 4M-22 29L17 30M-14 13L-8 14M-15 19L-8 20M-5-5Q-17-29-3-38M-8-15Q-28-29-25-15Q-21-9-8-15M-2-30C-18-40-10-50-2-43C-5-59 11-57 10-44C22-53 28-37 14-35C27-24 14-17 8-30Q0-17-6-25Q-9-30-2-30Z"/> <path d="M6-37l.1 1M-32 35L-29 32M-25 36L-22 33M-17 36L-14 33"/></g>
+    <g id="balloons"><path d="M-12 7C-41-6-31-41-10-37C10-33 12-10-12 7ZM-12 7L-15 13L-7 14ZM17-5C-5-18 6-47 25-41C48-35 40-14 17-5ZM17-5L13 1L21 1ZM-12 14C-33 37 8 24-4 48M18 2C4 21 29 23 8 41M-23-25Q-29-18-24-10M21-32Q27-34 31-28"/></g>
+    <g id="headphones"><path d="M-27 5C-38-42 33-46 30-2M-21 1C-28-31 25-34 24-1M-29-1Q-39-3-37 8L-32 25Q-30 32-21 29L-15 25L-23 1ZM23 0L18 5L24 27Q39 31 40 18L35 1ZM-26 32C-48 51-1 49-6 34C-9 23-24 36-12 42Q0 51 19 40M-32 8L-25 6M-30 14L-23 12M29 8L35 7M31 15L37 14"/></g>
+    <g id="toast"><path d="M-25-6C-40-11-38-28-24-30Q-3-37 19-28C32-24 32-10 24-7L23 29Q-3 36-27 28ZM-18-6C-29-12-27-22-18-23Q0-28 15-20Q23-15 16-7L17 23Q-1 28-20 22ZM-11 3l.1 1M8 3l.1 1M-8 12Q-1 19 7 10M-7-17L-4-13M6-17L9-14M-13 20L-10 17M2 22L5 18"/></g>
+    <g id="cactus"><path d="M-5 7L-9-29C-10-41 9-42 11-29L12-8L18-10L17-22Q17-31 25-30Q33-30 32-21L31-3Q31 7 13 8M-7-9L-17-11L-17-20Q-19-29-26-25Q-32-23-29-15L-27-4Q-24 6-6 7M-21 10L25 9L19 39L-12 40ZM-18 18L22 17M-7 27l.1 1M7 26l.1 1M-4 32Q1 36 6 31"/> <path d="M-1-28L2-30M1-18L4-20M0-7L4-9M22-16L26-17M-25-17L-20-16M-8 22L-5 19M0 22L3 19M10 21L13 18"/></g>
+    <g id="kite"><path d="M-3-35L25-5L4 20L-26-4ZM-3-35L4 20M-26-4L25-5M4 20C-15 35 25 36 6 53Q-7 61 0 69M2 30L-8 25L-6 37L2 32L10 36L11 25ZM7 48L-2 43L-1 55L7 50L16 54L17 43Z"/> <path d="M-15-10L-10-21M-11-7L-5-24M11-9L14-13"/></g>
+    <g id="paper-plane"><path d="M-42-5L40-29L15 30L-5 6ZM-5 6L29-21M-5 6L-3 26L6 17M-35-4L-10 2M15 20L32-20M18 22L34-19M-37 20C-53 32-30 40-21 30Q-11 18-26 18Q-39 18-39 28"/></g>
+    <g id="winged-letter"><path d="M-23-15L25-10L22 26L-26 22ZM-22-12L-3 7L25-8M-25 20L-10 5M21 23L8 6M-24-7C-41-28-56-19-41-5Q-58-11-52 3Q-43 15-25 12M25-3C47-24 60-9 43 1Q59-3 50 11Q40 20 24 16M-43-12L-29 2M43-5L29 6"/></g>
+    <g id="turtle"><path d="M-31 10C-39-21-1-37 17-13Q26-3 23 12ZM-32 10Q-8 20 23 12M24 3C38-13 52-2 43 9Q37 17 24 12M-26 14L-34 25L-23 27L-16 16M9 17L16 27L25 23L19 15M-34 6L-45 9L-34 14M36 2l.1 1M-22-8L-13 6L2-1L0-19M2-1L17 8M-13 6L-16 13M-22-8L-31-4"/></g>
+    <g id="jellyfish"><path d="M-22 2C-24-33 23-35 26 1Q17-8 11 2Q3-7-4 3Q-13-6-22 2ZM-15 7C-28 24-5 25-17 42M-2 8C-12 19 13 25 0 44M13 7C5 22 31 23 18 38M-10-10l.1 1M10-11l.1 1M-7-1Q1 6 8-3M-17-16L-12-20"/></g>
+    <g id="coffee"><path d="M-28-4Q-3-13 25-4L21 25Q17 39-4 36Q-25 34-26 25ZM-26-3Q-2 4 24-3M26 2C49-10 46 26 23 23M-38 40Q-3 51 35 39M-15-17C-30-30-8-29-18-43M2-18C-13-33 12-32 3-49M-14 9l.1 1M6 10l.1 1M-10 20Q-3 27 5 20M-21 18L-18 26M-15 28L-12 24"/></g>
+    <g id="fish"><path d="M-27 0C-9-25 15-22 28-5L43-14L39 3L45 16L28 8C9 26-14 20-27 0ZM-26 0Q-19 2-14-1M-8-10C-1-6 0 9-8 15M5-17L13-26L19-17M3 17L10 25L17 17M-16-4l.1 1M9-6L16-3M9 2L16 5"/></g>
+    <g id="croissant"><path d="M-34-3C-34-28-17-22-20-11C-6-25 15-24 26-9C27-23 44-20 38 0C32 24-25 26-34-3ZM-20-11Q-16 5-21 13M-7-19Q1-3-5 18M9-20Q21-4 12 17M26-9Q32-2 26 10M-30 1L-25 2M31 1L35-1"/></g>
+    <g id="pencil"><path d="M-32 12L17-31Q22-36 27-31L32-25Q36-21 31-17L-16 26L-37 31ZM-32 12L-16 26M-37 31L-30 16M12-27L28-12M-24 12L17-23M-20 17L22-19M-7 29C6 47 25 22 8 18Q-7 15-2 29Q5 42 36 33"/></g>
+    <g id="shooting-star"><path d="M8-22L17-5L36-3L22 10L25 29L8 19L-10 29L-6 10L-20-3L0-6ZM-28-18C-14-23-5-27 3-36M-36-28Q-13-31-4-44M-20-8Q-11-13-7-18M4 8l.1 1M15 8l.1 1M5 14Q9 18 15 13"/></g>
+    <g id="sprig"><path d="M-14 23C-15 6-1-11 13-27M-9 10Q-31 5-26-6Q-11-9-6 5M2-6Q-16-20-7-26Q9-26 8-13M-7 7Q12-3 17 7Q15 21-7 12M7-13Q22-28 29-16Q26-3 12-8"/></g>
+    <g id="heart"><path d="M0 17C-11 8-25-5-16-15C-10-23 1-16 1-9C3-23 21-23 22-10C24 2 10 11 0 17Z"/></g>
+    <g id="star"><path d="M0-17L5-5L19-4L8 5L10 19L-1 11L-14 17L-11 3L-21-6L-6-7Z"/></g>
+    <g id="curl"><path d="M-13 12C-31-7-5-29 14-14C34 4 5 30-7 14C-17 1 3-12 9 1Q13 10 4 11"/></g>
+    <g id="ripples"><path d="M-23-4Q-12-16-1-4T23-4M-19 6Q-10-3 0 6T21 6M-12 16Q-5 9 3 16T17 15"/></g>
+    <g id="rays"><path d="M-15 6L-25 0M-5-2L-9-15M8-3L13-18M17 4L29-3"/></g>
+    <g id="notes"><path d="M-9 12L-12-15L12-22L15 5M-11-9L13-16M-9 12C-22 3-28 20-17 22Q-7 24-9 12ZM15 5C1-1-3 15 7 16Q17 17 15 5Z"/></g>
+    <g id="leaf"><path d="M-16 20C-35-1-10-28 20-25C26 2 4 29-16 20ZM-16 20L9-13M-8 10L-15 0M0-2L12-1"/></g>
+    <g id="seed"><path d="M-9 8Q-20-1-8-10Q2-3-9 8ZM4-1Q-3-19 12-18Q18-8 4-1ZM8 13Q16-1 24 9Q21 22 8 13Z"/></g>
+    <g id="wiggle"><path d="M-25 8C-16-16-1 26 7 3S28 8 33-5"/></g>
+    <g id="dots"><path d="M-13-2l.1.1M0 3l.1.1M12-3l.1.1"/></g>
+    <g id="hatch"><path d="M-14 7L-8-8M-5 10L2-10M4 9L11-6"/></g>
+  </defs>
+  <use href="#sleeping-cat" transform="translate(82 73) rotate(-14) scale(0.94)" stroke-width="1.97"/>
+  <use href="#sleeping-cat" transform="translate(82 713) rotate(-14) scale(0.94)" stroke-width="1.97"/>
+  <use href="#rocket" transform="translate(294 64) rotate(20) scale(0.88)" stroke-width="2.1"/>
+  <use href="#rocket" transform="translate(294 704) rotate(20) scale(0.88)" stroke-width="2.1"/>
+  <use href="#teapot" transform="translate(511 80) rotate(-12) scale(0.9)" stroke-width="2.06"/>
+  <use href="#frog" transform="translate(205 218) rotate(12) scale(0.94)" stroke-width="1.97"/>
+  <use href="#cloud-friend" transform="translate(420 212) rotate(-12) scale(0.83)" stroke-width="2.23"/>
+  <use href="#snail" transform="translate(-66 282) rotate(12) scale(0.87)" stroke-width="2.13"/>
+  <use href="#snail" transform="translate(574 282) rotate(12) scale(0.87)" stroke-width="2.13"/>
+  <use href="#whale" transform="translate(83 349) rotate(-8) scale(0.94)" stroke-width="1.97"/>
+  <use href="#mushrooms" transform="translate(310 375) rotate(-11) scale(0.9)" stroke-width="2.06"/>
+  <use href="#cat-mug" transform="translate(463 437) rotate(13) scale(0.92)" stroke-width="2.01"/>
+  <use href="#winged-book" transform="translate(173 526) rotate(-18) scale(0.79)" stroke-width="2.34"/>
+  <use href="#message-bottle" transform="translate(366 -56) rotate(-17) scale(0.88)" stroke-width="2.1"/>
+  <use href="#message-bottle" transform="translate(366 584) rotate(-17) scale(0.88)" stroke-width="2.1"/>
+  <use href="#moon-friend" transform="translate(-39 568) rotate(16) scale(0.88)" stroke-width="2.1"/>
+  <use href="#moon-friend" transform="translate(601 568) rotate(16) scale(0.88)" stroke-width="2.1"/>
+  <use href="#cactus" transform="translate(-11 22) rotate(15) scale(0.77)" stroke-width="2.4"/>
+  <use href="#cactus" transform="translate(-11 662) rotate(15) scale(0.77)" stroke-width="2.4"/>
+  <use href="#cactus" transform="translate(629 22) rotate(15) scale(0.77)" stroke-width="2.4"/>
+  <use href="#cactus" transform="translate(629 662) rotate(15) scale(0.77)" stroke-width="2.4"/>
+  <use href="#little-bird" transform="translate(181 68) rotate(18) scale(0.78)" stroke-width="2.37"/>
+  <use href="#planet" transform="translate(386 53) rotate(-22) scale(0.56)" stroke-width="3.3"/>
+  <use href="#sun" transform="translate(582 122) rotate(15) scale(0.54)" stroke-width="3.43"/>
+  <use href="#kite" transform="translate(58 206) rotate(-13) scale(0.69)" stroke-width="2.68"/>
+  <use href="#little-house" transform="translate(316 187) rotate(18) scale(0.63)" stroke-width="2.94"/>
+  <use href="#umbrella" transform="translate(506 207) rotate(25) scale(0.65)" stroke-width="2.85"/>
+  <use href="#headphones" transform="translate(115 234) rotate(-12) scale(0.62)" stroke-width="2.98"/>
+  <use href="#toast" transform="translate(339 286) rotate(-20) scale(0.64)" stroke-width="2.89"/>
+  <use href="#winged-letter" transform="translate(47 465) rotate(-28) scale(0.59)" stroke-width="3.14"/>
+  <use href="#winged-letter" transform="translate(687 465) rotate(-28) scale(0.59)" stroke-width="3.14"/>
+  <use href="#turtle" transform="translate(231 425) rotate(22) scale(0.6)" stroke-width="3.08"/>
+  <use href="#flower-boot" transform="translate(579 420) rotate(12) scale(0.68)" stroke-width="2.72"/>
+  <use href="#balloons" transform="translate(525 535) rotate(-9) scale(0.67)" stroke-width="2.76"/>
+  <use href="#coffee" transform="translate(267 555) rotate(18) scale(0.61)" stroke-width="3.03"/>
+  <use href="#bird-letter" transform="translate(-10 363) rotate(-18) scale(0.59)" stroke-width="3.14"/>
+  <use href="#bird-letter" transform="translate(630 363) rotate(-18) scale(0.59)" stroke-width="3.14"/>
+  <use href="#planet" transform="translate(378 487) rotate(20) scale(0.61)" stroke-width="3.03"/>
+  <use href="#cactus" transform="translate(206 338) rotate(-12) scale(0.64)" stroke-width="2.89"/>
+  <use href="#pencil" transform="translate(441 336) rotate(32) scale(0.69)" stroke-width="2.68"/>
+  <use href="#paper-plane" transform="translate(534 -20) rotate(-12) scale(0.79)" stroke-width="2.34"/>
+  <use href="#paper-plane" transform="translate(534 620) rotate(-12) scale(0.79)" stroke-width="2.34"/>
+  <use href="#headphones" transform="translate(79 -45) rotate(25) scale(0.58)" stroke-width="3.19"/>
+  <use href="#headphones" transform="translate(79 595) rotate(25) scale(0.58)" stroke-width="3.19"/>
+  <use href="#moon-friend" transform="translate(12 103) rotate(-20) scale(0.5)" stroke-width="3.7"/>
+  <use href="#moon-friend" transform="translate(652 103) rotate(-20) scale(0.5)" stroke-width="3.7"/>
+  <use href="#mushrooms" transform="translate(455 -35) rotate(11) scale(0.5)" stroke-width="3.7"/>
+  <use href="#mushrooms" transform="translate(455 605) rotate(11) scale(0.5)" stroke-width="3.7"/>
+  <use href="#flower-boot" transform="translate(-30 204) rotate(-21) scale(0.55)" stroke-width="3.36"/>
+  <use href="#flower-boot" transform="translate(610 204) rotate(-21) scale(0.55)" stroke-width="3.36"/>
+  <use href="#shooting-star" transform="translate(233 129) rotate(12) scale(0.44)" stroke-width="4.2"/>
+  <use href="#little-bird" transform="translate(99 146) rotate(15) scale(0.53)" stroke-width="3.49"/>
+  <use href="#paper-plane" transform="translate(402 126) rotate(-20) scale(0.44)" stroke-width="4.2"/>
+  <use href="#open-book" transform="translate(531 143) rotate(-28) scale(0.67)" stroke-width="2.76"/>
+  <use href="#winged-letter" transform="translate(159 144) rotate(28) scale(0.34)" stroke-width="5.44"/>
+  <use href="#sprig" transform="translate(274 272) rotate(24) scale(0.57)" stroke-width="3.25"/>
+  <use href="#jellyfish" transform="translate(146 414) rotate(14) scale(0.53)" stroke-width="3.49"/>
+  <use href="#star" transform="translate(356 234) rotate(13) scale(0.58)" stroke-width="3.19"/>
+  <use href="#heart" transform="translate(508 352) rotate(-15) scale(0.57)" stroke-width="3.25"/>
+  <use href="#fish" transform="translate(393 389) rotate(-18) scale(0.47)" stroke-width="3.94"/>
+  <use href="#croissant" transform="translate(89 527) rotate(-22) scale(0.48)" stroke-width="3.85"/>
+  <use href="#jellyfish" transform="translate(273 474) rotate(-15) scale(0.45)" stroke-width="4.11"/>
+  <use href="#little-bird" transform="translate(456 524) rotate(18) scale(0.47)" stroke-width="3.94"/>
+  <use href="#flower-boot" transform="translate(16 562) rotate(-18) scale(0.38)" stroke-width="4.87"/>
+  <use href="#flower-boot" transform="translate(656 562) rotate(-18) scale(0.38)" stroke-width="4.87"/>
+  <use href="#fish" transform="translate(-22 483) rotate(-22) scale(0.47)" stroke-width="3.94"/>
+  <use href="#fish" transform="translate(618 483) rotate(-22) scale(0.47)" stroke-width="3.94"/>
+  <use href="#sprig" transform="translate(316 497) rotate(-22) scale(0.56)" stroke-width="3.3"/>
+  <use href="#notes" transform="translate(550 470) rotate(22) scale(0.55)" stroke-width="3.36"/>
+  <use href="#notes" transform="translate(135 303) rotate(-21) scale(0.51)" stroke-width="3.63"/>
+  <use href="#curl" transform="translate(137 38) rotate(-23) scale(0.37)" stroke-width="4.46"/>
+  <use href="#heart" transform="translate(230 21) rotate(13) scale(0.36)" stroke-width="4.58"/>
+  <use href="#heart" transform="translate(230 661) rotate(13) scale(0.36)" stroke-width="4.58"/>
+  <use href="#dots" transform="translate(344 29) rotate(24) scale(0.55)" stroke-width="3"/>
+  <use href="#dots" transform="translate(344 669) rotate(24) scale(0.55)" stroke-width="3"/>
+  <use href="#rays" transform="translate(336 103) rotate(-32) scale(0.38)" stroke-width="4.34"/>
+  <use href="#seed" transform="translate(442 32) rotate(17) scale(0.5)" stroke-width="3.3"/>
+  <use href="#seed" transform="translate(442 672) rotate(17) scale(0.5)" stroke-width="3.3"/>
+  <use href="#hatch" transform="translate(460 89) rotate(-22) scale(0.55)" stroke-width="3"/>
+  <use href="#wiggle" transform="translate(553 31) rotate(-37) scale(0.42)" stroke-width="3.93"/>
+  <use href="#wiggle" transform="translate(553 671) rotate(-37) scale(0.42)" stroke-width="3.93"/>
+  <use href="#star" transform="translate(32 41) rotate(17) scale(0.38)" stroke-width="4.34"/>
+  <use href="#curl" transform="translate(550 160) rotate(20) scale(0.36)" stroke-width="4.58"/>
+  <use href="#dots" transform="translate(467 148) rotate(-20) scale(0.55)" stroke-width="3"/>
+  <use href="#heart" transform="translate(348 130) rotate(23) scale(0.37)" stroke-width="4.46"/>
+  <use href="#ripples" transform="translate(212 153) rotate(-16) scale(0.45)" stroke-width="3.67"/>
+  <use href="#star" transform="translate(19 155) rotate(-16) scale(0.34)" stroke-width="4.85"/>
+  <use href="#star" transform="translate(659 155) rotate(-16) scale(0.34)" stroke-width="4.85"/>
+  <use href="#seed" transform="translate(115 102) rotate(29) scale(0.43)" stroke-width="3.84"/>
+  <use href="#wiggle" transform="translate(145 190) rotate(-41) scale(0.42)" stroke-width="3.93"/>
+  <use href="#dots" transform="translate(251 195) rotate(-27) scale(0.56)" stroke-width="2.95"/>
+  <use href="#heart" transform="translate(270 226) rotate(-19) scale(0.32)" stroke-width="5.16"/>
+  <use href="#curl" transform="translate(363 188) rotate(17) scale(0.38)" stroke-width="4.34"/>
+  <use href="#leaf" transform="translate(547 221) rotate(31) scale(0.4)" stroke-width="4.12"/>
+  <use href="#star" transform="translate(-4 242) rotate(-21) scale(0.33)" stroke-width="5"/>
+  <use href="#star" transform="translate(636 242) rotate(-21) scale(0.33)" stroke-width="5"/>
+  <use href="#wiggle" transform="translate(28 293) rotate(17) scale(0.44)" stroke-width="3.75"/>
+  <use href="#wiggle" transform="translate(668 293) rotate(17) scale(0.44)" stroke-width="3.75"/>
+  <use href="#seed" transform="translate(86 287) rotate(-16) scale(0.44)" stroke-width="3.75"/>
+  <use href="#heart" transform="translate(165 270) rotate(27) scale(0.34)" stroke-width="4.85"/>
+  <use href="#rays" transform="translate(251 319) rotate(29) scale(0.45)" stroke-width="3.67"/>
+  <use href="#dots" transform="translate(296 325) rotate(23) scale(0.55)" stroke-width="3"/>
+  <use href="#curl" transform="translate(391 302) rotate(-18) scale(0.35)" stroke-width="4.71"/>
+  <use href="#leaf" transform="translate(491 286) rotate(32) scale(0.38)" stroke-width="4.34"/>
+  <use href="#hatch" transform="translate(527 324) rotate(-23) scale(0.54)" stroke-width="3.06"/>
+  <use href="#ripples" transform="translate(23 391) rotate(14) scale(0.42)" stroke-width="3.93"/>
+  <use href="#ripples" transform="translate(663 391) rotate(14) scale(0.42)" stroke-width="3.93"/>
+  <use href="#star" transform="translate(172 373) rotate(-21) scale(0.4)" stroke-width="4.12"/>
+  <use href="#seed" transform="translate(181 440) rotate(19) scale(0.42)" stroke-width="3.93"/>
+  <use href="#curl" transform="translate(264 392) rotate(-16) scale(0.32)" stroke-width="5.16"/>
+  <use href="#dots" transform="translate(352 430) rotate(-18) scale(0.6)" stroke-width="2.75"/>
+  <use href="#wiggle" transform="translate(350 350) rotate(-22) scale(0.4)" stroke-width="4.12"/>
+  <use href="#heart" transform="translate(410 446) rotate(28) scale(0.34)" stroke-width="4.85"/>
+  <use href="#seed" transform="translate(532 400) rotate(-24) scale(0.43)" stroke-width="3.84"/>
+  <use href="#star" transform="translate(18 503) rotate(13) scale(0.39)" stroke-width="4.23"/>
+  <use href="#star" transform="translate(658 503) rotate(13) scale(0.39)" stroke-width="4.23"/>
+  <use href="#dots" transform="translate(127 475) rotate(-26) scale(0.6)" stroke-width="2.75"/>
+  <use href="#curl" transform="translate(225 488) rotate(22) scale(0.34)" stroke-width="4.85"/>
+  <use href="#hatch" transform="translate(222 580) rotate(-27) scale(0.55)" stroke-width="3"/>
+  <use href="#heart" transform="translate(319 541) rotate(-13) scale(0.34)" stroke-width="4.85"/>
+  <use href="#wiggle" transform="translate(426 562) rotate(18) scale(0.42)" stroke-width="3.93"/>
+  <use href="#star" transform="translate(484 568) rotate(26) scale(0.38)" stroke-width="4.34"/>
+  <use href="#seed" transform="translate(569 493) rotate(-20) scale(0.44)" stroke-width="3.75"/>
+  <use href="#curl" transform="translate(-4 440) rotate(16) scale(0.35)" stroke-width="4.71"/>
+  <use href="#curl" transform="translate(636 440) rotate(16) scale(0.35)" stroke-width="4.71"/>
+  <use href="#rays" transform="translate(590 -16) rotate(31) scale(0.38)" stroke-width="4.34"/>
+  <use href="#rays" transform="translate(590 624) rotate(31) scale(0.38)" stroke-width="4.34"/>
+  <use href="#dots" transform="translate(112 -8) rotate(-18) scale(0.65)" stroke-width="2.54"/>
+  <use href="#dots" transform="translate(112 632) rotate(-18) scale(0.65)" stroke-width="2.54"/>
+  <use href="#leaf" transform="translate(175 -20) rotate(24) scale(0.4)" stroke-width="4.12"/>
+  <use href="#leaf" transform="translate(175 620) rotate(24) scale(0.4)" stroke-width="4.12"/>
+  <use href="#heart" transform="translate(304 -19) rotate(20) scale(0.38)" stroke-width="4.34"/>
+  <use href="#heart" transform="translate(304 621) rotate(20) scale(0.38)" stroke-width="4.34"/>
+  <use href="#curl" transform="translate(19 -9) rotate(17) scale(0.35)" stroke-width="4.71"/>
+  <use href="#curl" transform="translate(19 631) rotate(17) scale(0.35)" stroke-width="4.71"/>
+  <use href="#curl" transform="translate(659 -9) rotate(17) scale(0.35)" stroke-width="4.71"/>
+  <use href="#curl" transform="translate(659 631) rotate(17) scale(0.35)" stroke-width="4.71"/>
+</svg>

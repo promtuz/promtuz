@@ -24,7 +24,7 @@ fun rememberChatWallpaper(wallpaper: Wallpaper): Modifier {
         is Wallpaper.Pattern -> {
             val ctx = LocalContext.current
             val brush = remember {
-                val bmp = AppCompatResources.getDrawable(ctx, R.drawable.pattern_chat_topography)!!
+                val bmp = AppCompatResources.getDrawable(ctx, R.drawable.pattern_chat_doodles)!!
                     .toBitmap(1200, 1200)
                     .asImageBitmap()
                 ShaderBrush(ImageShader(bmp, TileMode.Repeated, TileMode.Repeated))
