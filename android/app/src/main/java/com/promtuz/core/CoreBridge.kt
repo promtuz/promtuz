@@ -443,6 +443,9 @@ object CoreBridge {
     suspend fun searchMessages(conversationId: ByteArray, query: String, limit: Int = 200): List<SearchHit> =
         withContext(Dispatchers.IO) { ffiSearchMessages(conversationId, query, limit.toUInt()) }
 
+    suspend fun searchAllMessages(query: String, limit: Int = 60): List<MessageRecord> =
+        withContext(Dispatchers.IO) { uniffi.core.searchAllMessages(query, limit.toUInt()) }
+
     suspend fun sendVoice(
         conversationId: ByteArray, data: ByteArray, mime: String, durationMs: Int, waveform: ByteArray,
         replyTo: ByteArray? = null,

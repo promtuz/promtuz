@@ -268,9 +268,9 @@ fun HomeChatListItem(
     }
 }
 
-private val HomeNameStyle = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
-private val HomeTimeStyle = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
-private val HomePreviewStyle = TextStyle(fontSize = 14.5.sp, lineHeight = 20.sp)
+internal val HomeNameStyle = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
+internal val HomeTimeStyle = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
+internal val HomePreviewStyle = TextStyle(fontSize = 14.5.sp, lineHeight = 20.sp)
 
 private fun statusLine(chat: ChatSummary, typing: Boolean, c: PromtuzColors): Pair<String, Color> = when {
     typing -> "typing…" to c.accent

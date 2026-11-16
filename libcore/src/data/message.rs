@@ -505,6 +505,25 @@ impl Message {
         hits.into_iter().filter_map(|(did, newer)| Some((did.try_into().ok()?, newer))).collect()
     }
 
+    /// Every chat at once, newest first. Hidden chats are sealed, so they never match.
+    pub fn search_all(query: &str, limit: u32) -> Vec<MessageRow> {
+        let needle = query.trim();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let pattern =
+            format!("%{}%", needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let rows: Vec<MessageRow> = all(
+            &core().db.messages().lock(),
+            "SELECT * FROM messages WHERE deleted = 0 AND system = 0 \
+               AND content LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2",
+            (pattern, limit),
+            MessageRow::from_row,
+        )
+        .unwrap_or_default();
+        rows.into_iter().filter(|r| !crate::privacy::is_private(&r.conversation_id)).collect()
+    }
+
     /// Window depth of the first message at or after `timestamp`, else of the latest.
     /// Timestamp and id order differ after an offline drain, so pick by timestamp, count by id.
     pub fn position_at_time(

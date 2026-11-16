@@ -396,6 +396,12 @@ pub fn search_messages(
         .collect())
 }
 
+/// Messages in every chat containing `query`, newest first.
+#[uniffi::export]
+pub fn search_all_messages(query: String, limit: u32) -> Vec<MessageRecord> {
+    Message::search_all(&query, limit).into_iter().map(Into::into).collect()
+}
+
 /// A calendar target, including its pagination depth. IDs keep the target
 /// stable if newer messages arrive while the client widens its window.
 #[derive(uniffi::Record)]

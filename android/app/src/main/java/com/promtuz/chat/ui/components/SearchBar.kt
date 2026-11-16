@@ -87,7 +87,7 @@ fun HomeSearchBar(
                     IconButton(onClick = { motion.onBack() }, modifier = Modifier.graphicsLayer {
                         alpha = motion.fraction().coerceIn(0f, 1f)
                     }) {
-                        TopBarMorphIcon(MorphGlyph.Back, "Back", tint = Promtuz.colors.muted, modifier = Modifier.size(20.dp), strokeWidth = 2.25.dp)
+                        TopBarMorphIcon(MorphGlyph.Close, "Close search", tint = Promtuz.colors.text, modifier = Modifier.size(22.dp))
                     }
                 }
             }
