@@ -652,7 +652,7 @@ private fun ComposerRow(
                 targetState = when {
                     action is ComposerAction.Edit -> R.drawable.i_edit_check
                     hasContent -> R.drawable.i_send
-                    else -> R.drawable.i_mic
+                    else -> R.drawable.oi_mic
                 },
                 transitionSpec = {
                     (scaleIn(tween(140), 0.6f) + fadeIn(tween(140)))

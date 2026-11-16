@@ -132,7 +132,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
             }
             if (mediaCount > 0 && directConversation != null) item("media") {
                 SettingsCard {
-                    SettingsRow("Shared media", icon = R.drawable.oi_image, value = mediaCount.toString(), trailing = Trailing.Chevron,
+                    SettingsRow("Shared media", icon = R.drawable.i_image, value = mediaCount.toString(), trailing = Trailing.Chevron,
                         onClick = { app.navigator.push(Routes.SharedMedia(directConversation, name)) })
                 }
             }

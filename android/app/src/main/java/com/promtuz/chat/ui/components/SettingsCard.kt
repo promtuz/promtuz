@@ -165,7 +165,7 @@ fun SettingsRow(
     ) {
         value?.let { Text(it, style = RowValueStyle, color = valueColor ?: c.muted, maxLines = 1) }
         when (trailing) {
-            Trailing.Chevron -> MorphIcon(MorphGlyph.ChevronRight, null, Modifier.size(18.dp), tint = c.muted)
+            Trailing.Chevron -> MorphIcon(MorphGlyph.ChevronRight, null, Modifier.size(20.dp), tint = c.muted)
             Trailing.Check -> DrawableIcon(com.promtuz.chat.R.drawable.oi_check, size = 20.dp, tint = c.accent)
             Trailing.External -> DrawableIcon(com.promtuz.chat.R.drawable.oi_external_link, size = 20.dp, tint = c.muted)
             null -> {}

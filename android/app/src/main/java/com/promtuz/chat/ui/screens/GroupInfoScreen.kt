@@ -203,11 +203,11 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 if (!dialogOpen) item("work") { GroupWorkFeedback(work) }
                 val manage = canManage && hasRules && conversation != null
                 if (manage || (media > 0 && conversation != null)) item("settings") {
-                    SettingsCard {
-                        if (manage) SettingsRow("Group settings", icon = com.promtuz.chat.R.drawable.i_chat_settings,
+                    SettingsCard(Modifier.padding(top = 12.dp)) {
+                        if (manage) SettingsRow("Group settings", icon = com.promtuz.chat.R.drawable.i_settings,
                             subtitle = "Who can send, edit info and add people", trailing = Trailing.Chevron,
                             onClick = { app.navigator.push(com.promtuz.chat.navigation.Routes.GroupSettings(conversation!!)) })
-                        if (media > 0 && conversation != null) SettingsRow("Shared media", icon = com.promtuz.chat.R.drawable.oi_image,
+                        if (media > 0 && conversation != null) SettingsRow("Shared media", icon = com.promtuz.chat.R.drawable.i_image,
                             value = media.toString(), trailing = Trailing.Chevron,
                             onClick = { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) })
                     }

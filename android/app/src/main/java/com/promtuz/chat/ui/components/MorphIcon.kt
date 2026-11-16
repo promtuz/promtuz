@@ -35,13 +35,12 @@ private val hiddenStroke = line(12f, 12f, 12f, 12f)
  * keep their identities through interrupted motion; bends use a small setback to keep tips sharp.
  */
 enum class MorphGlyph(internal val strokes: List<Float>, internal val angle: Float = 0f) {
-    Back(bend(12f, 2.375f, 2.375f, 12f, 12f, 21.625f) + line(2.8f, 12f, 21.625f, 12f)),
-    ChevronLeft(bend(16.8125f, 2.375f, 7.1875f, 12f, 16.8125f, 21.625f) + hiddenStroke),
+    Back(bend(10.5f, 5.5f, 4f, 12f, 10.5f, 18.5f) + line(4.5f, 12f, 20f, 12f)),
+    ChevronLeft(bend(14.5f, 5.5f, 8.5f, 12f, 14.5f, 18.5f) + hiddenStroke),
     ChevronRight(ChevronLeft.strokes, 180f),
     ChevronUp(ChevronLeft.strokes, 90f),
     ChevronDown(ChevronLeft.strokes, -90f),
-    // Match the plus's stroke length, rather than filling the square along both diagonals.
-    Close(line(5.1941f, 5.1941f, 18.8059f, 18.8059f) + line(5.1941f, 18.8059f, 18.8059f, 5.1941f)),
+    Close(line(6f, 6f, 18f, 18f) + line(6f, 18f, 18f, 6f)),
     Plus(Close.strokes, 45f),
     Check(bend(2.375f, 12f, 8.79167f, 18.41667f, 21.625f, 5.58333f) + hiddenStroke),
     Code(bend(8.875f, 5.5f, 2.375f, 12f, 8.875f, 18.5f) + bend(15.125f, 5.5f, 21.625f, 12f, 15.125f, 18.5f)),

@@ -72,7 +72,7 @@ fun AboutScreen(onOpenLicenses: () -> Unit, onOpenHistory: () -> Unit, updates: 
                 )
             }
             SettingsCard {
-                SettingsRow("What’s new", icon = R.drawable.i_download, trailing = Trailing.Chevron, onClick = onOpenHistory)
+                SettingsRow("What’s new", icon = R.drawable.i_update, trailing = Trailing.Chevron, onClick = onOpenHistory)
                 SettingsRow("Source code", subtitle = "github.com/promtuz", leading = {
                     MorphIcon(MorphGlyph.Code, null, Modifier.size(24.dp), tint = c.muted)
                 }, leadingSize = 24.dp, trailing = Trailing.External, onClick = {

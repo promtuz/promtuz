@@ -1,0 +1,30 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+  <path
+      android:pathData="M3.5 1.5H8.25C9.58333 1.5 10.25 2.16667 10.25 3.5V8.25C10.25 9.58333 9.58333 10.25 8.25 10.25H3.5C2.16667 10.25 1.5 9.58333 1.5 8.25V3.5C1.5 2.16667 2.16667 1.5 3.5 1.5ZM4.6 4H7.15C7.55 4 7.75 4.2 7.75 4.6V7.15C7.75 7.55 7.55 7.75 7.15 7.75H4.6C4.2 7.75 4 7.55 4 7.15V4.6C4 4.2 4.2 4 4.6 4Z"
+      android:fillColor="#e3e3e3"
+      android:fillType="evenOdd"/>
+  <path
+      android:pathData="M15.75 1.5H20.5C21.8333 1.5 22.5 2.16667 22.5 3.5V8.25C22.5 9.58333 21.8333 10.25 20.5 10.25H15.75C14.4167 10.25 13.75 9.58333 13.75 8.25V3.5C13.75 2.16667 14.4167 1.5 15.75 1.5ZM16.85 4H19.4C19.8 4 20 4.2 20 4.6V7.15C20 7.55 19.8 7.75 19.4 7.75H16.85C16.45 7.75 16.25 7.55 16.25 7.15V4.6C16.25 4.2 16.45 4 16.85 4Z"
+      android:fillColor="#e3e3e3"
+      android:fillType="evenOdd"/>
+  <path
+      android:pathData="M3.5 13.75H8.25C9.58333 13.75 10.25 14.4167 10.25 15.75V20.5C10.25 21.8333 9.58333 22.5 8.25 22.5H3.5C2.16667 22.5 1.5 21.8333 1.5 20.5V15.75C1.5 14.4167 2.16667 13.75 3.5 13.75ZM4.6 16.25H7.15C7.55 16.25 7.75 16.45 7.75 16.85V19.4C7.75 19.8 7.55 20 7.15 20H4.6C4.2 20 4 19.8 4 19.4V16.85C4 16.45 4.2 16.25 4.6 16.25Z"
+      android:fillColor="#e3e3e3"
+      android:fillType="evenOdd"/>
+  <path
+      android:pathData="M15 15H16.75V17.25C16.75 17.75 17 18 17.5 18H21.25V21.25"
+      android:strokeColor="#e3e3e3"
+      android:strokeWidth="2.5"
+      android:strokeLineCap="round"
+      android:strokeLineJoin="round"/>
+  <path
+      android:pathData="M22.1 12.5H20.65C20.4291 12.5 20.25 12.6791 20.25 12.9V14.35C20.25 14.5709 20.4291 14.75 20.65 14.75H22.1C22.3209 14.75 22.5 14.5709 22.5 14.35V12.9C22.5 12.6791 22.3209 12.5 22.1 12.5Z"
+      android:fillColor="#e3e3e3"/>
+  <path
+      android:pathData="M14.35 20.25H12.9C12.6791 20.25 12.5 20.4291 12.5 20.65V22.1C12.5 22.3209 12.6791 22.5 12.9 22.5H14.35C14.5709 22.5 14.75 22.3209 14.75 22.1V20.65C14.75 20.4291 14.5709 20.25 14.35 20.25Z"
+      android:fillColor="#e3e3e3"/>
+</vector>

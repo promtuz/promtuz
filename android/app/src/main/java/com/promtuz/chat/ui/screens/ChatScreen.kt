@@ -447,7 +447,7 @@ private fun menuActionsFor(
     val scope = rememberCoroutineScope()
     val main = buildList {
         val actionable = !msg.deleted
-        if (actionable) add(MenuAction("Reply", R.drawable.oi_reply) {
+        if (actionable) add(MenuAction("Reply", R.drawable.i_reply) {
             viewModel.beginReply(msg); close()
         })
         if (actionable && msg.outgoing) add(MenuAction("Message info", R.drawable.oi_info) {
