@@ -1,5 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.ui.graphics.Color
+
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -57,7 +61,7 @@ fun ContactPicker(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(people.filter { it.ipkHex in selected }, key = { it.ipkHex }) { person ->
                             Row(Modifier.animateItem().clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                                .background(Promtuz.colors.accentFill.copy(alpha = 0.12f))
                                 .clickable(enabled = enabled) { onClick(person) }
                                 .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -76,7 +80,7 @@ fun ContactPicker(
 
             if (visible.isEmpty()) item {
                 Text(if (query.isBlank()) emptyText else "No contacts found",
-                    Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Modifier.padding(24.dp), color = Promtuz.colors.muted)
             }
             items(visible, key = { it.ipkHex }) { person ->
                 Row(
@@ -102,21 +106,20 @@ fun ContactPicker(
 
 @Composable
 private fun SelectableContactAvatar(name: String, ipkHex: String, selecting: Boolean, selected: Boolean) {
-    val colors = MaterialTheme.colorScheme
     val scale by animateFloatAsState(if (selected) 0.94f else 1f, spring(), label = "selected avatar")
     val check by animateFloatAsState(if (selected) 1f else 0f, spring(), label = "contact check")
-    val fill by animateColorAsState(if (selected) colors.primary else colors.surfaceContainerHigh,
+    val fill by animateColorAsState(if (selected) Promtuz.colors.accentFill else Promtuz.colors.cardHigh,
         ChatMotion.spec(), label = "contact selection fill")
     Box(Modifier.size(48.dp)) {
         Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { Avatar(name, size = 44.dp, identityKey = ipkHex, image = rememberAvatar(ipkHex)) }
         AnimatedVisibility(selected, Modifier.align(Alignment.BottomEnd),
             enter = fadeIn(ChatMotion.spec()) + scaleIn(spring(), initialScale = 0.4f),
             exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.4f)) {
-            Box(Modifier.size(20.dp).clip(CircleShape).background(fill).border(2.dp, colors.background, CircleShape),
+            Box(Modifier.size(20.dp).clip(CircleShape).background(fill).border(2.dp, Promtuz.colors.page, CircleShape),
                 contentAlignment = Alignment.Center) {
                 MorphIcon(MorphGlyph.Check, null, Modifier.size(10.dp).graphicsLayer {
                     alpha = check; scaleX = check; scaleY = check
-                }, tint = colors.onPrimary, strokeWidth = 1.25.dp)
+                }, tint = Color.White, strokeWidth = 1.25.dp)
             }
         }
     }
@@ -130,7 +133,7 @@ fun GroupWorkFeedback(work: GroupWork) {
             CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             Text(work.label, style = MaterialTheme.typography.bodyMedium)
         }
-        is GroupWork.Failed -> Text(work.reason, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+        is GroupWork.Failed -> Text(work.reason, Modifier.padding(16.dp), color = Promtuz.colors.danger)
         GroupWork.Idle -> Unit
     }
 }

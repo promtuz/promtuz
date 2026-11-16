@@ -1,7 +1,8 @@
 package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.components.TextButton
-import com.promtuz.chat.ui.components.Button
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import com.promtuz.chat.ui.components.AppAlertDialog
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,6 +21,8 @@ import com.promtuz.chat.ui.media.*
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.core.CoreBridge
+import com.promtuz.chat.domain.model.Presence
+import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
@@ -65,22 +68,21 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
         }
     }.collectAsState(0)
 
+    val presenceMap by CoreBridge.presenceByPeer.collectAsState()
+    val presence = presenceMap[peer]
+    val status = presenceText(presence, rememberPresenceTime())
+    val c = Promtuz.colors
     ProfileScaffold(name = name, photo = { size ->
         Avatar(name, size, image = picture, identityKey = peer, originKey = "contact:$peer",
             onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("contact:$peer", it, name))) } })
-    }, actions = {
-        AppDropMenu(anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Contact options") }, groups = buildList {
-            if (profile?.canShare == true) add(listOf(MenuAction("Share contact", R.drawable.oi_export) { app.navigator.push(Routes.ContactCard(peer, profile?.name.orEmpty(), true)) }))
-            if (BuildConfig.DEBUG && !hidden) add(listOf(MenuAction("Debug info", R.drawable.oi_info) {
-                scope.launch {
-                    debug = runCatching { CoreBridge.contactsDiag().firstOrNull { it.ipk.contentEquals(peer.fromHex()) }?.let {
-                        "Identity\n$peer\n\nMLS epoch: ${it.epoch ?: "—"}\nMessages: ${it.messageCount}\nPending operations: ${it.pendingOps}"
-                    } }.getOrNull() ?: "No diagnostics available"
+    }, subtitle = status, subtitleColor = if (presence == Presence.Online) c.accent else c.muted, actions = {
+        AppDropMenu(anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Contact options") }, groups = listOf(
+            buildList {
+                if (profile?.canShare == true) add(MenuAction("Share contact", R.drawable.oi_export) { app.navigator.push(Routes.ContactCard(peer, profile?.name.orEmpty(), true)) })
+                if (chat != null && !chat.request) {
+                    if (hidden) add(MenuAction("Remove lock", R.drawable.oi_lock_chat_open) { removingLock = true })
+                    else add(MenuAction("Lock chat", R.drawable.oi_lock_chat) { app.navigator.push(Routes.LockChat(chat.conversationHex)) })
                 }
-            }))
-            if (chat != null && !chat.request) add(buildList {
-                if (hidden) add(MenuAction("Remove lock", R.drawable.oi_lock_chat_open) { removingLock = true })
-                else add(MenuAction("Lock chat", R.drawable.oi_lock_chat) { app.navigator.push(Routes.LockChat(chat.conversationHex)) })
                 if (canSecret) add(MenuAction(if (secret != null) "Open secret chat" else "Start secret chat", iconPlaceholder = "secret") {
                     if (secret != null) app.openChat(secret.conversationHex, secret.name)
                     else if (!starting) {
@@ -89,47 +91,59 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                         app.startSecretChat(peer, name) { starting = false; error = it }
                     }
                 })
-            })
-            if (chat != null && !chat.isSecret) add(listOf(MenuAction("Delete contact", R.drawable.oi_trash, destructive = true) { deleting = true }))
-        })
+            },
+            buildList {
+                if (BuildConfig.DEBUG && !hidden) add(MenuAction("Debug info", R.drawable.oi_info) {
+                    scope.launch {
+                        debug = runCatching { CoreBridge.contactsDiag().firstOrNull { it.ipk.contentEquals(peer.fromHex()) }?.let {
+                            "Identity\n$peer\n\nMLS epoch: ${it.epoch ?: "-"}\nMessages: ${it.messageCount}\nPending operations: ${it.pendingOps}"
+                        } }.getOrNull() ?: "No diagnostics available"
+                    }
+                })
+            },
+            buildList { if (chat != null && !chat.isSecret) add(MenuAction("Delete contact", R.drawable.oi_trash, destructive = true) { deleting = true }) },
+        ).filter { it.isNotEmpty() })
     }) { padding ->
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 18.dp, end = 18.dp,
-            top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Top) {
-            item {
-                if (!profile?.nickname.isNullOrBlank() && profile?.name != name)
-                    Text(profile?.name.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (!profile?.bio.isNullOrBlank()) Text(profile!!.bio, Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(20.dp))
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(top = 12.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item("actions") {
+                ProfileActions(buildList {
+                    // Without a chat, their side receives it as a message request.
+                    add(MenuAction("Message", R.drawable.i_send) {
+                        if (chat != null) app.openChat(chat.conversationHex, name) else app.openChatWith(peer, name)
+                    })
+                    if (chat != null) add(MenuAction(if (chat.muted) "Unmute" else "Mute",
+                        if (chat.muted) R.drawable.i_speaker else R.drawable.i_volume_off) {
+                        scope.launch { runCatching { CoreBridge.setConversationMuted(chat.conversationHex.fromHex(), !chat.muted) }
+                            .onFailure { error = "Couldn't change notifications" } }
+                    })
+                })
             }
-            // Their side receives it as a message request.
-            if (chat == null) item {
-                Button(onClick = { app.openChatWith(peer, name) }) { Text("Message") }
+            val realName = profile?.name.orEmpty().takeIf { it.isNotBlank() && it != name }
+            val bio = profile?.bio.orEmpty()
+            if (realName != null || bio.isNotBlank() || chat != null) item("about") {
+                SettingsCard {
+                    if (realName != null) SettingsRow(realName, subtitle = "Profile name")
+                    if (bio.isNotBlank()) SettingsRow(bio, subtitle = "About")
+                    if (chat != null) SettingsRow(profile?.nickname?.ifBlank { null } ?: "Add a nickname",
+                        subtitle = "Nickname, only you see it", trailing = Trailing.Chevron,
+                        onClick = { nickname = profile?.nickname.orEmpty(); error = null })
+                }
             }
-            if (chat != null) item {
-                Button(onClick = { app.openChat(chat.conversationHex, name) }) { Text("Message") }
-                Spacer(Modifier.height(16.dp))
-                GroupedActionRow("Nickname", 0, 2, supportingText = profile?.nickname?.ifBlank { "Only visible to you" },
-                    onClick = { nickname = profile?.nickname.orEmpty(); error = null }) { DrawableIcon(R.drawable.i_user, size = 24.dp) }
+            if (mediaCount > 0 && directConversation != null) item("media") {
+                SettingsCard {
+                    SettingsRow("Shared media", icon = R.drawable.oi_image, value = mediaCount.toString(), trailing = Trailing.Chevron,
+                        onClick = { app.navigator.push(Routes.SharedMedia(directConversation, name)) })
+                }
             }
-            if (chat != null) item {
-                GroupedActionRow("Notifications", 1, 2, supportingText = if (chat.muted) "Muted" else "On",
-                    onClick = { scope.launch { runCatching { CoreBridge.setConversationMuted(chat.conversationHex.fromHex(), !chat.muted) }
-                        .onFailure { error = "Couldn't change notifications" } } }) { DrawableIcon(R.drawable.i_notifications, size = 24.dp) }
-            }
-            if (mediaCount > 0 && directConversation != null) item {
-                Spacer(Modifier.height(16.dp))
-                GroupedActionRow("Shared media", 0, 1, supportingText = if (mediaCount == 1) "1 attachment" else "$mediaCount attachments",
-                    onClick = { app.navigator.push(Routes.SharedMedia(directConversation, name)) }) { DrawableIcon(R.drawable.oi_image, size = 24.dp) }
-            }
-            error?.let { item { Text(it, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error) } }
+            error?.let { item("error") { Text(it, Modifier.padding(horizontal = 16.dp), style = FootnoteStyle, color = c.danger) } }
         }
     }
     nickname?.let { draft -> AppAlertDialog(onDismissRequest = { if (!busy) nickname = null }, title = { Text("Nickname") },
         text = { Column {
             AppTextField(draft, { if (it.length <= 32) nickname = it }, singleLine = true, enabled = !busy,
                 label = "Name", supportingText = { Text("Leave empty to use their profile name.") })
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            error?.let { Text(it, style = FootnoteStyle, color = Promtuz.colors.danger) }
         } },
         confirmButton = { TextButton(enabled = !busy, onClick = {
             busy = true; scope.launch {

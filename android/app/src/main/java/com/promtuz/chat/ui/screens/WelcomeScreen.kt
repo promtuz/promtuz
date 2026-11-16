@@ -1,7 +1,7 @@
 package com.promtuz.chat.ui.screens
 
-import com.promtuz.chat.ui.components.Button
-import com.promtuz.chat.ui.components.OutlinedButton
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import android.app.Activity
 import android.content.Intent
 import androidx.compose.animation.AnimatedContent
@@ -137,7 +137,7 @@ fun WelcomeScreen(
 
             }
 
-            Button(
+            AppButton(
                 onClick = {
                     isNormal.then {
                         welcomeViewModel.`continue` { onEnrolled() }
@@ -173,15 +173,10 @@ fun WelcomeScreen(
                 color = colors.onSurfaceVariant,
             )
 
-            OutlinedButton(
-                { onImport() }, Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    stringResource(R.string.welcome_screen_continue_existing_button),
-                    fontWeight = FontWeight.W500,
-                    style = typography.labelLarge
-                )
-            }
+            AppButton(
+                stringResource(R.string.welcome_screen_continue_existing_button),
+                { onImport() }, Modifier.fillMaxWidth(), kind = ButtonKind.Tonal,
+            )
 
             Box(
                 Modifier

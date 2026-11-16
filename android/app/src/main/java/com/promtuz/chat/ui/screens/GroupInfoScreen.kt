@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -24,6 +25,7 @@ import org.koin.androidx.compose.koinViewModel
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.pictureItem
+import com.promtuz.chat.ui.theme.Promtuz
 
 @Composable
 fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel()) {
@@ -126,6 +128,8 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     var query by rememberSaveable { mutableStateOf("") }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var showPast by rememberSaveable { mutableStateOf(false) }
+    var showAll by rememberSaveable { mutableStateOf(false) }
+    val presence by com.promtuz.core.CoreBridge.presenceByPeer.collectAsState()
     var removing by remember { mutableStateOf<UiMember?>(null) }
     var leaving by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
@@ -153,7 +157,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     }
     val colors = MaterialTheme.colorScheme
 
-    ProfileScaffold(name = displayName.ifBlank { "Group" }, photo = { size ->
+    ProfileScaffold(name = displayName.ifBlank { "Group" }, subtitle = if (loading || loadError) null else memberTally(active.size), photo = { size ->
         GroupAvatar(title, active.filterNot { it.me }.map { it.name }, size = size, conversation = conversation,
             onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("group:$conversation", it, displayName))) } })
     }, actions = {
@@ -163,6 +167,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 if (locked) MenuAction("Remove lock", com.promtuz.chat.R.drawable.oi_lock_chat_open) { removingLock = true }
                 else MenuAction("Lock chat", com.promtuz.chat.R.drawable.oi_lock_chat) { app.navigator.push(com.promtuz.chat.navigation.Routes.LockChat(conversation)) },
             ), buildList {
+                if (canEdit) add(MenuAction("Edit name", com.promtuz.chat.R.drawable.oi_edit) { draft = title; editing = true; actions.clearError() })
                 if (canEdit) add(MenuAction("Set group photo", com.promtuz.chat.R.drawable.oi_camera) {
                     picker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
                 })
@@ -184,68 +189,93 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                         TextButton(onClick = { actions.reload() }) { Text("Retry") }
                     }
                 }
-            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(0.dp, 0.dp, 80.dp)) {
-                item {
-                    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(memberTally(active.size), color = colors.onSurfaceVariant)
-                        if (canEdit) TextButton(onClick = { draft = title; editing = true; actions.clearError() }, enabled = !busy) {
-                            Text("Edit group name")
+            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(top = 12.dp, bottom = 80.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (conversation != null) item("actions") {
+                    ProfileActions(listOf(
+                        MenuAction("Message", com.promtuz.chat.R.drawable.i_send) { app.openChat(conversation, displayName) },
+                        MenuAction(if (muted) "Unmute" else "Mute",
+                            if (muted) com.promtuz.chat.R.drawable.i_speaker else com.promtuz.chat.R.drawable.i_volume_off) {
+                            if (!busy) actions.setMuted(!muted)
+                        },
+                    ))
+                }
+                if (!dialogOpen) item("work") { GroupWorkFeedback(work) }
+                val manage = canManage && hasRules && conversation != null
+                if (manage || (media > 0 && conversation != null)) item("settings") {
+                    SettingsCard {
+                        if (manage) SettingsRow("Group settings", icon = com.promtuz.chat.R.drawable.i_chat_settings,
+                            subtitle = "Who can send, edit info and add people", trailing = Trailing.Chevron,
+                            onClick = { app.navigator.push(com.promtuz.chat.navigation.Routes.GroupSettings(conversation!!)) })
+                        if (media > 0 && conversation != null) SettingsRow("Shared media", icon = com.promtuz.chat.R.drawable.oi_image,
+                            value = media.toString(), trailing = Trailing.Chevron,
+                            onClick = { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) })
+                    }
+                }
+                val open: (UiMember) -> Unit = { member ->
+                    app.navigator.push(if (member.me) com.promtuz.chat.navigation.Routes.Profile
+                        else com.promtuz.chat.navigation.Routes.PersonInfo(member.ipkHex, member.name))
+                }
+                val shown = if (showAll || active.size <= MemberPreview + 1) active else active.take(MemberPreview)
+                val more = active.size - shown.size
+                val rows = 1 + (if (canAdd) 1 else 0) + shown.size + (if (more > 0) 1 else 0) +
+                    (if (past.isNotEmpty()) 1 else 0) + (if (showPast) past.size else 0)
+                var index = 0
+                val headerIndex = index++
+                item("members-header") {
+                    Box(Modifier.fillMaxWidth().lazyCardRow(headerIndex, rows)) {
+                        Text(memberTally(active.size), Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp),
+                            style = SectionHeaderStyle, color = Promtuz.colors.accent)
+                    }
+                }
+                if (canAdd) {
+                    val i = index++
+                    item("members-add") {
+                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 70.dp)) {
+                            SettingsRow("Add members", icon = com.promtuz.chat.R.drawable.i_user_add, titleColor = Promtuz.colors.accent,
+                                enabled = !busy, onClick = { adding = true; selected = emptySet(); query = ""; searching = false; actions.clearError() })
                         }
                     }
                 }
-                if (!dialogOpen) item { GroupWorkFeedback(work) }
-                item {
-                    ListItem(
-                        supportingContent = { Text(if (muted) "Muted" else "On") },
-                        trailingContent = { Switch(checked = !muted, onCheckedChange = { actions.setMuted(!it) }, enabled = !busy) },
-                    ) { Text("Notifications") }
-                    if (canManage && hasRules && conversation != null) ListItem(
-                        supportingContent = { Text("Who can send messages, edit group info and add members") },
-                        modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.GroupSettings(conversation)) },
-                    ) { Text("Group settings") }
-                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Members", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                        if (canAdd) TextButton(onClick = { adding = true; selected = emptySet(); query = ""; searching = false; actions.clearError() }, enabled = !busy) {
-                            Text("Add members")
+                val first = index
+                itemsIndexed(shown, key = { _, it -> it.ipkHex }) { i, member ->
+                    GroupMemberRow(member, first + i, rows, !busy, actionsFor(member), presence[member.ipkHex], onClick = { open(member) })
+                }
+                index += shown.size
+                if (more > 0) {
+                    val i = index++
+                    item("members-more") {
+                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 70.dp)) {
+                            SettingsRow("Show $more more", icon = com.promtuz.chat.R.drawable.i_users, titleColor = Promtuz.colors.accent,
+                                onClick = { showAll = true })
                         }
                     }
-                }
-                if (media > 0 && conversation != null) item {
-                    ListItem(supportingContent = { Text(if (media == 1) "1 attachment" else "$media attachments") },
-                        modifier = Modifier.clickable { app.navigator.push(com.promtuz.chat.navigation.Routes.SharedMedia(conversation, displayName)) }) {
-                        Text("Shared media")
-                    }
-                }
-                items(active, key = { it.ipkHex }) { member ->
-                    GroupMemberRow(member, !busy, actionsFor(member),
-                        onClick = { app.navigator.push(if (member.me) com.promtuz.chat.navigation.Routes.Profile
-                            else com.promtuz.chat.navigation.Routes.PersonInfo(member.ipkHex, member.name)) },
-                    )
                 }
                 if (past.isNotEmpty()) {
-                    item { TextButton(onClick = { showPast = !showPast }, modifier = Modifier.padding(horizontal = 12.dp)) {
-                        Text(if (showPast) "Hide past members" else "Past members (${past.size})")
-                    } }
-                    if (showPast) items(past, key = { "past:${it.ipkHex}" }) { member ->
-                        GroupMemberRow(member, !busy, emptyList(),
-                            onClick = { app.navigator.push(if (member.me) com.promtuz.chat.navigation.Routes.Profile
-                                else com.promtuz.chat.navigation.Routes.PersonInfo(member.ipkHex, member.name)) },
-                        )
+                    val i = index++
+                    item("members-past") {
+                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 70.dp)) {
+                            SettingsRow(if (showPast) "Hide past members" else "Past members", value = if (showPast) null else past.size.toString(),
+                                titleColor = Promtuz.colors.accent, onClick = { showPast = !showPast })
+                        }
+                    }
+                    val pastFirst = index
+                    if (showPast) itemsIndexed(past, key = { _, it -> "past:${it.ipkHex}" }) { i, member ->
+                        GroupMemberRow(member, pastFirst + i, rows, !busy, emptyList(), null, onClick = { open(member) })
                     }
                 }
-                item {
-                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                    if (ownerIsStuck) {
-                        Text("You own this group. To leave, first remove the other members.",
-                            Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = colors.onSurfaceVariant)
-                        TextButton(onClick = { deleting = true; actions.clearError() }, enabled = !busy,
-                            modifier = Modifier.padding(horizontal = 12.dp)) { Text("Delete chat", color = colors.error) }
-                    } else if (canLeave) {
-                        TextButton(onClick = { leaving = true; actions.clearError() }, enabled = !busy,
-                            modifier = Modifier.padding(horizontal = 12.dp)) { Text("Leave group", color = colors.error) }
+                if (ownerIsStuck) {
+                    item("stuck") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("You own this group. To leave, first remove the other members.",
+                                Modifier.padding(horizontal = 16.dp), style = FootnoteStyle, color = Promtuz.colors.muted)
+                            SettingsCard { SettingsRow("Delete chat", titleColor = Promtuz.colors.danger, enabled = !busy,
+                                onClick = { deleting = true; actions.clearError() }) }
+                        }
                     }
+                } else if (canLeave) item("leave") {
+                    SettingsCard { SettingsRow("Leave group", titleColor = Promtuz.colors.danger, enabled = !busy,
+                        onClick = { leaving = true; actions.clearError() }) }
                 }
             }
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
@@ -301,7 +331,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                     }, emptyText = when { contactsLoading || contactsError -> ""; candidates.isEmpty() -> "Add contacts before inviting members"; else -> "All your contacts are already in this group" })
                 GroupWorkFeedback(work)
                 val picks = addable.filter { it.ipkHex in selected }
-                GroupActionButton(if (picks.size == 1) "Add 1 member" else "Add ${picks.size} members",
+                AppButton(if (picks.size == 1) "Add 1 member" else "Add ${picks.size} members",
                     onClick = { actions.addMembers(picks) { dismissRequested = true } },
                     enabled = !busy && picks.isNotEmpty(), modifier = Modifier.fillMaxWidth().padding(16.dp))
             }
@@ -320,26 +350,34 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     if (removingLock && conversation != null) RemoveLockDialog(app, conversation, displayName) { removingLock = false }
 }
 
+private const val MemberPreview = 5
+
 @Composable
-private fun GroupMemberRow(member: UiMember, enabled: Boolean, actions: List<MenuAction>, onClick: () -> Unit) {
+private fun GroupMemberRow(member: UiMember, index: Int, count: Int, enabled: Boolean, actions: List<MenuAction>,
+    presence: com.promtuz.chat.domain.model.Presence?, onClick: () -> Unit) {
+    val now = rememberPresenceTime()
+    val menu = actions.isNotEmpty() && enabled
     val row = @Composable {
-        ListItem(
-            leadingContent = {
-                val avatar = rememberAvatar(member.ipkHex)
+        SettingsRow(
+            member.name,
+            subtitle = if (!member.active) "Past member" else if (member.me) null else presenceText(presence, now),
+            value = if (member.admin && member.active) (if (member.owner) "Owner" else "Admin") else null,
+            enabled = enabled,
+            leading = {
                 Avatar(
-                    member.name, size = 44.dp, image = avatar, identityKey = member.ipkHex, originKey = "avatar-${member.ipkHex}",
-                    onClick = onClick.takeIf { enabled },
+                    member.name, size = 44.dp, image = rememberAvatar(member.ipkHex), identityKey = member.ipkHex,
+                    originKey = "avatar-${member.ipkHex}", onClick = onClick.takeIf { enabled },
                 )
             },
-            supportingContent = if (!member.active) {{ Text("Past member") }} else null,
-            trailingContent = if (member.admin && member.active) {{
-                Text(if (member.owner) "Owner" else "Admin", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }} else null,
-        ) { Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            leadingSize = 44.dp,
+            onClick = onClick.takeIf { !menu },
+        )
     }
-    if (actions.isEmpty() || !enabled) Box(Modifier.clickable(enabled = enabled, onClick = onClick)) { row() }
-    else AppDropMenu(anchor = row, groups = listOf(actions), onClick = onClick, onClickLabel = "Open profile",
-        onLongClickLabel = "Member options")
+    Box(Modifier.lazyCardRow(index, count, dividerStart = 70.dp)) {
+        if (!menu) row()
+        else AppDropMenu(anchor = row, groups = listOf(actions), onClick = onClick, onClickLabel = "Open profile",
+            onLongClickLabel = "Member options")
+    }
 }
 
 @Composable

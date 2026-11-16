@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -45,7 +47,6 @@ fun StagedStrip(items: List<StagedMedia>, onRemove: (ULong) -> Unit, modifier: M
 
 @Composable
 private fun StagedTile(item: StagedMedia, onRemove: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
     val chat = LocalChatColors.current
 
     Box(Modifier.size(TileSize)) {
@@ -53,7 +54,7 @@ private fun StagedTile(item: StagedMedia, onRemove: () -> Unit) {
             Modifier
                 .fillMaxSize()
                 .clip(RoundedCornerShape(TileRadius))
-                .background(if (item.failed) colors.error.copy(alpha = 0.18f) else colors.surfaceVariant),
+                .background(if (item.failed) Promtuz.colors.danger.copy(alpha = 0.18f) else Promtuz.colors.cardHigh),
             contentAlignment = Alignment.Center,
         ) {
             item.preview?.let {
@@ -63,7 +64,7 @@ private fun StagedTile(item: StagedMedia, onRemove: () -> Unit) {
                 item.name.takeLast(10),
                 Modifier.padding(horizontal = 4.dp),
                 style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant,
+                color = Promtuz.colors.muted,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -82,7 +83,7 @@ private fun StagedTile(item: StagedMedia, onRemove: () -> Unit) {
                 item.failed -> MorphIcon(
                     MorphGlyph.Close, null,
                     Modifier.size(20.dp),
-                    tint = colors.error,
+                    tint = Promtuz.colors.danger,
                 )
             }
         }
@@ -93,7 +94,7 @@ private fun StagedTile(item: StagedMedia, onRemove: () -> Unit) {
                 .padding(2.dp)
                 .size(18.dp)
                 .clip(CircleShape)
-                .background(colors.scrim.copy(alpha = 0.7f))
+                .background(Color.Black.copy(alpha = 0.7f))
                 .clickable(onClick = onRemove),
             contentAlignment = Alignment.Center,
         ) {

@@ -1,5 +1,11 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.ui.layout.boundsInRoot
+
+import androidx.compose.ui.graphics.layer.drawLayer
+
+import androidx.compose.ui.draw.drawWithContent
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.size
@@ -78,8 +84,7 @@ fun HomeChatListItem(
     onRequestDecision: (RequestDecision) -> Unit = {},
     privateChat: Boolean = false,
 ) {
-    val colors = MaterialTheme.colorScheme
-    val c = Promtuz.colors
+        val c = Promtuz.colors
     val haptic = LocalHapticFeedback.current
     val unread = chat.unreadCount > 0
 
@@ -88,6 +93,7 @@ fun HomeChatListItem(
     var confirmRequest by remember { mutableStateOf<RequestDecision?>(null) }
     val interaction = remember { MutableInteractionSource() }
     val rowCoord = remember { object { var c: LayoutCoordinates? = null } }
+    val snapshot = androidx.compose.ui.graphics.rememberGraphicsLayer()
 
     val groups = if (chat.request) listOf(listOf(
         MenuAction("Block", icon = R.drawable.oi_user_slash, destructive = true) { confirmRequest = RequestDecision.Block },
@@ -109,6 +115,10 @@ fun HomeChatListItem(
             Modifier
                 .fillMaxWidth()
                 .onGloballyPositioned { rowCoord.c = it }
+                .drawWithContent {
+                    snapshot.record { this@drawWithContent.drawContent() }
+                    drawLayer(snapshot)
+                }
                 .indication(interaction, PressHighlight)
                 // A quick lift opens the chat, an early drag scrolls the list, and a hold
                 // opens the menu for the same finger to drag to an item.
@@ -136,7 +146,8 @@ fun HomeChatListItem(
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     val at = rowCoord.c?.takeIf { it.isAttached }?.localToRoot(down.position)
                                         ?: Offset.Zero
-                                    menuState.open(HomeMenuAnchor(at, groups))
+                                    val bounds = rowCoord.c?.takeIf { it.isAttached }?.boundsInRoot()
+                                    menuState.open(HomeMenuAnchor(at, groups, bounds, snapshot))
                                     dragSelect(down, haptic, { menuState.hitIndex(rowCoord.c, it) }, { menuState.hovered = it }) {
                                         groups.flatten().getOrNull(it)?.onClick()
                                         menuState.close()
@@ -322,7 +333,7 @@ fun RequestConfirmDialog(decision: RequestDecision, name: String, onConfirm: () 
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text(if (block) "Block" else "Delete", color = MaterialTheme.colorScheme.error) }
+            TextButton(onClick = onConfirm) { Text(if (block) "Block" else "Delete", color = Promtuz.colors.danger) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -335,7 +346,7 @@ fun DeleteChatDialog(
     onLeaveAndDelete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val error = MaterialTheme.colorScheme.error
+    val error = Promtuz.colors.danger
     if (chat.ownerIsStuck) {
         AppAlertDialog(
             onDismissRequest = onDismiss,
@@ -415,19 +426,17 @@ fun ClearHistoryDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Uni
         },
         confirmButton = {
             TextButton(onClick = onConfirm) {
-                Text("Clear", color = MaterialTheme.colorScheme.error)
+                Text("Clear", color = Promtuz.colors.danger)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
-private val OnlineDot = Color(0xFF34C759)
-private val IdleDot = Color(0xFFF5A623)
-
 /** Null hides the avatar dot. */
+@Composable
 private fun presenceColor(p: Presence?): Color? = when (p) {
-    Presence.Online -> OnlineDot
-    is Presence.Idle -> IdleDot
+    Presence.Online -> Promtuz.colors.success
+    is Presence.Idle -> Promtuz.colors.warn
     else -> null
 }

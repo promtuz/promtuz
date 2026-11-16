@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.draw.clipToBounds
@@ -45,7 +47,6 @@ fun SearchableHeader(
     showActionsWhileSearching: Boolean = false,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
-    val colors = MaterialTheme.colorScheme
     val titleStyle = screenTitleStyle()
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -63,13 +64,13 @@ fun SearchableHeader(
                     LaunchedEffect(searching) { if (searching) focus.requestFocus() }
                     BasicTextField(query, onQuery, enabled = enabled && searching, singleLine = true,
                         modifier = Modifier.fillMaxSize().focusRequester(focus).semantics { contentDescription = searchLabel },
-                        textStyle = searchTextStyle().copy(color = colors.onSurface),
-                        cursorBrush = SolidColor(colors.primary),
+                        textStyle = searchTextStyle().copy(color = Promtuz.colors.text),
+                        cursorBrush = SolidColor(Promtuz.colors.accentFill),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
                         decorationBox = { inner ->
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-                                if (query.isEmpty()) Text(searchLabel, color = colors.onSurfaceVariant,
+                                if (query.isEmpty()) Text(searchLabel, color = Promtuz.colors.muted,
                                     style = searchTextStyle(), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 inner()
                             }
@@ -104,7 +105,7 @@ fun SearchableHeader(
         navigationIcon = {
             IconButton(onClick = onBack, enabled = enabled) {
                 val description = if (searching) "Close search" else if (close) "Clear selection" else "Back"
-                val tint = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
+                val tint = Promtuz.colors.text.copy(alpha = if (enabled) 1f else 0.38f)
                 TopBarMorphIcon(if (close || searching) MorphGlyph.Close else MorphGlyph.Back,
                     description, tint = tint)
             }

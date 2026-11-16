@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column

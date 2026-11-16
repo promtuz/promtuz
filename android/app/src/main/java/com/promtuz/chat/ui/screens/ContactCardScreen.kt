@@ -1,6 +1,7 @@
 package com.promtuz.chat.ui.screens
 
-import com.promtuz.chat.ui.components.Button
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import android.content.Intent
 import android.util.Base64
 import androidx.compose.foundation.layout.*
@@ -44,15 +45,15 @@ fun ContactCardScreen(route: Routes.ContactCard) {
                 Text(card.ipk.toHex().chunked(8).joinToString(" "), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (route.sharing) {
-                    Button(onClick = {
+                    AppButton("Share contact", onClick = {
                         val encoded = Base64.encodeToString(bytes!!, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
                         val link = "https://promtuz.dev/contact#$encoded"
                         context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain")
                             .putExtra(Intent.EXTRA_TEXT, "${card.name}\n$link"), "Share contact"))
-                    }) { Text("Share contact") }
+                    })
                 } else {
                     // Someone who hasn't added us gets our first message as a request.
-                    Button(enabled = !busy, onClick = {
+                    AppButton("Message", busy = busy, onClick = {
                         busy = true
                         scope.launch {
                             runCatching { CoreBridge.chatFromCard(bytes!!) }
@@ -60,7 +61,7 @@ fun ContactCardScreen(route: Routes.ContactCard) {
                                 .onFailure { error = "Couldn't open a chat with ${card.name}" }
                             busy = false
                         }
-                    }) { Text("Message") }
+                    })
                 }
             } ?: if (error == null) CircularProgressIndicator() else Unit
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }

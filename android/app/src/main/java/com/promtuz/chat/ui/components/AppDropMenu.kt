@@ -80,6 +80,16 @@ import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.launch
+import com.promtuz.chat.ui.theme.Promtuz
+import com.promtuz.chat.ui.theme.Radii
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
+import dev.chrisbanes.haze.blur.hazeBlur
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 
 data class MenuAction(
     val label: String,
@@ -105,7 +115,7 @@ fun AppDropMenu(
     itemHeight: Dp = 48.dp,
     verticalPadding: Dp = 0.dp,
     offset: DpOffset = DpOffset(0.dp, 0.dp),
-    shape: Shape = RoundedCornerShape(20.dp),
+    shape: Shape = RoundedCornerShape(Radii.menu),
     iconSize: Dp = MenuIconSize,
     onClick: (() -> Unit)? = null,
     onClickLabel: String? = null,
@@ -325,9 +335,10 @@ open class DragMenuState<A : Any>(maxTargets: Int) {
 
 internal val Overshoot = Easing { OvershootInterpolator(1.1f).getInterpolation(it) }
 
-/** Dims and guards the screen behind a [DragMenuState] menu, and plays the menu's pop in and out. */
+/** Blurs, dims and guards the screen behind a [DragMenuState] menu, and plays the menu's pop in and out. */
 @Composable
-internal fun MenuBackdrop(state: DragMenuState<*>, dim: Float, scrimMs: Int, popMs: Int, exitMs: Int) {
+internal fun MenuBackdrop(state: DragMenuState<*>, haze: HazeState, dim: Float, scrimMs: Int, popMs: Int, exitMs: Int) {
+    androidx.activity.compose.BackHandler(!state.closing) { state.close() }
     LaunchedEffect(Unit) {
         launch { state.scrim.animateTo(dim, tween(scrimMs, easing = EaseOutQuint)) }
         state.pop.animateTo(1f, tween(popMs, easing = Overshoot))
@@ -339,11 +350,20 @@ internal fun MenuBackdrop(state: DragMenuState<*>, dim: Float, scrimMs: Int, pop
             state.closed()
         }
     }
+    val style = remember(dim) {
+        val scrim = HazeColorEffect.tint(Color.Black.copy(alpha = dim))
+        HazeBlurStyle {
+            blurRadius(20.dp)
+            noiseFactor(0f)
+            colorEffects(listOf(scrim))
+            fallbackColorEffect(scrim)
+            alpha((state.scrim.value / dim).coerceIn(0f, 1f))
+        }
+    }
     Box(
         Modifier
             .fillMaxSize()
-            .graphicsLayer { alpha = state.scrim.value }
-            .background(Color.Black)
+            .hazeBlur(HazeInput.Sources(haze), style)
             .pointerInput(Unit) { detectTapGestures { state.close() } },
     )
 }
@@ -356,22 +376,17 @@ fun MenuCard(
     modifier: Modifier = Modifier,
     itemHeight: Dp = 48.dp,
     verticalPadding: Dp = 0.dp,
-    shape: Shape = RoundedCornerShape(20.dp),
+    shape: Shape = RoundedCornerShape(Radii.menu),
     iconSize: Dp = MenuIconSize,
+    haze: HazeState? = LocalRootHaze.current,
     onRowPositioned: ((Int, LayoutCoordinates) -> Unit)? = null,
     onPick: (MenuAction) -> Unit,
 ) {
-    Surface(
-        shape = shape,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        tonalElevation = 0.dp,
-        shadowElevation = 8.dp,
-        modifier = modifier,
-    ) {
-        Column(Modifier.width(IntrinsicSize.Max).padding(vertical = verticalPadding)) {
+    Box(modifier.floatingSurface(shape, haze)) {
+        Column(Modifier.width(IntrinsicSize.Max).padding(vertical = verticalPadding + 6.dp)) {
             var i = 0
             groups.forEachIndexed { gi, group ->
-                if (gi != 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                if (gi != 0) HorizontalDivider(Modifier.padding(vertical = 6.dp), color = Promtuz.colors.divider)
                 group.forEach { action ->
                     val index = i
                     MenuRow(
@@ -400,16 +415,14 @@ private fun MenuRow(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    val color =
-        if (action.destructive) MaterialTheme.colorScheme.error
-        else MaterialTheme.colorScheme.onSurface
+    val color = if (action.destructive) Promtuz.colors.danger else Promtuz.colors.text
     Row(
         modifier
             .fillMaxWidth()
             .widthIn(min = 160.dp, max = 280.dp)
             .height(itemHeight)
             .background(
-                if (highlighted) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent
+                if (highlighted) Promtuz.colors.text.copy(alpha = 0.08f) else Color.Transparent
             )
             .clickable(role = Role.Button, onClickLabel = action.label, onClick = onClick)
             .padding(horizontal = 16.dp),
@@ -422,6 +435,8 @@ private fun MenuRow(
             action.iconPlaceholder != null -> Text("[${action.iconPlaceholder}]", color = color,
                 style = MaterialTheme.typography.labelSmall)
         }
-        Text(action.label, color = color, style = MaterialTheme.typography.labelLarge)
+        Text(action.label, color = color, style = MenuLabelStyle)
     }
 }
+
+private val MenuLabelStyle = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium)

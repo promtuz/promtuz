@@ -117,11 +117,11 @@ fun MessageBubble(
     val longPress by rememberUpdatedState(onLongPress)
     val isTextBlock = msg.deleted || msg.content is MessageContent.Text
 
-    // Emoji, voice notes and stickers omit the bubble unless a quote needs it.
+    // Emoji and stickers omit the bubble unless a quote needs it.
     val jumboEmoji = !msg.deleted && msg.quote == null &&
         (msg.content as? MessageContent.Text)?.let { isJumboEmoji(it.text) } == true
     val bare = jumboEmoji || (!msg.deleted && msg.quote == null &&
-        (msg.content is MessageContent.Voice || msg.content is MessageContent.Sticker))
+        msg.content is MessageContent.Sticker)
 
     // A picture runs to the bubble's edge, so the bubble waives its inset and the padded
     // blocks put it back themselves. An attachment card keeps the inset like text.
@@ -221,7 +221,7 @@ fun MessageBubble(
                                 metaLabel, outgoing, onDownload, onOpen,
                             )
                         content is MessageContent.Voice ->
-                            VoiceBlock(content, textColor, surface = if (bare) bubbleColor else null)
+                            VoiceBlock(content, textColor, bubbleColor)
                         content is MessageContent.Sticker ->
                             StickerBlock(content, textColor)
                     }

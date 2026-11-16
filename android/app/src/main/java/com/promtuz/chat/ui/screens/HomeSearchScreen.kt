@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.screens
 
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.graphicsLayer
@@ -115,6 +117,7 @@ fun HomeSearchScreen(app: AppVM) {
     }
     val motion = LocalSearchMotion.current
     val background = MaterialTheme.colorScheme.background
+    val menuHaze = rememberHazeState()
     Box(Modifier.fillMaxSize().drawBehind {
         drawRect(background, alpha = motion.fraction().coerceIn(0f, 1f))
     }) {
@@ -123,7 +126,7 @@ fun HomeSearchScreen(app: AppVM) {
                 HomeSearchBar(expanded = true, query = query,
                     onQueryChange = { query = it; revealed = null; revealedId = null }, focusRequester = focus)
             }
-            LazyColumn(Modifier.fillMaxWidth().weight(1f).graphicsLayer {
+            LazyColumn(Modifier.fillMaxWidth().weight(1f).hazeSource(menuHaze).graphicsLayer {
                 alpha = motion.fraction().coerceIn(0f, 1f)
             }, contentPadding = WindowInsets.navigationBars.asPaddingValues().listPadding(0.dp, 0.dp, 24.dp)) {
                 if (results.isEmpty() && query.isNotEmpty()) item {
@@ -149,6 +152,6 @@ fun HomeSearchScreen(app: AppVM) {
                 }
             }
         }
-        HomeContextMenu(menu)
+        HomeContextMenu(menu, menuHaze)
     }
 }

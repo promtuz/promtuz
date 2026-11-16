@@ -141,12 +141,12 @@ private fun HomeEmpty(modifier: Modifier) {
             Text(
                 "No chats yet",
                 style = MaterialTheme.typography.titleMediumEmphasized,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = Promtuz.colors.text,
             )
             Text(
                 "Add a contact to start messaging.",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Promtuz.colors.muted,
                 textAlign = TextAlign.Center,
             )
         }

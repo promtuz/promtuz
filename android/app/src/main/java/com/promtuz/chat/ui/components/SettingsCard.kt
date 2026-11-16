@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Radii
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -17,6 +18,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.composed
+import com.promtuz.chat.ui.util.groupedRoundShape
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
@@ -27,12 +30,19 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.promtuz.chat.ui.theme.Promtuz
+
+val RowTitleStyle = TextStyle(fontSize = 16.sp, lineHeight = 22.sp)
+val RowSubtitleStyle = TextStyle(fontSize = 13.5.sp, lineHeight = 18.sp)
+val RowValueStyle = TextStyle(fontSize = 15.sp, lineHeight = 20.sp)
+val SectionHeaderStyle = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium)
+val FootnoteStyle = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
 
 private val Inset = 16.dp
 private val Glyph = 24.dp
@@ -66,7 +76,7 @@ fun SettingsCard(
                     Modifier.dividerInset(null).fillMaxWidth()
                         .padding(start = Inset, end = Inset, top = 14.dp, bottom = 2.dp)
                         .semantics { heading() },
-                    style = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
+                    style = SectionHeaderStyle,
                     color = c.accent,
                 )
                 content()
@@ -107,7 +117,7 @@ fun SettingsCard(
         if (footer != null) Text(
             footer,
             Modifier.padding(start = Inset, end = Inset, top = 8.dp),
-            style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
+            style = FootnoteStyle,
             color = c.muted,
         )
     }
@@ -144,6 +154,7 @@ fun SettingsRow(
     enabled: Boolean = true,
     leading: (@Composable () -> Unit)? = null,
     leadingSize: Dp = Glyph,
+    trailingContent: (@Composable RowScope.() -> Unit)? = null,
     onClick: (() -> Unit)? = null,
 ) {
     val c = Promtuz.colors
@@ -159,6 +170,7 @@ fun SettingsRow(
             Trailing.External -> DrawableIcon(com.promtuz.chat.R.drawable.oi_external_link, size = 20.dp, tint = c.muted)
             null -> {}
         }
+        trailingContent?.invoke(this)
     }
 }
 
@@ -215,7 +227,7 @@ private fun RowFrame(
         icon?.let { DrawableIcon(it, Modifier.alpha(a), size = Glyph, tint = c.muted) }
         leading?.invoke()
         Column(Modifier.weight(1f).alpha(a), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(title, style = RowTitleStyle, color = titleColor ?: c.text)
+            Text(title, style = RowTitleStyle, color = titleColor ?: c.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
             subtitle?.let { Text(it, style = RowSubtitleStyle, color = c.muted) }
         }
         Row(Modifier.alpha(a), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, content = trailing)
@@ -227,6 +239,25 @@ fun Modifier.cardBlock(): Modifier = dividerInset(null)
 
 /** A custom row whose divider starts at [start], where its text starts. */
 fun Modifier.cardRow(start: Dp = Inset): Modifier = dividerInset(start)
+
+/**
+ * A row standing in for a card when the list is too long for one [SettingsCard]: row [index] of
+ * [count] as a lazy item, rounding the card's ends and drawing the divider above itself.
+ */
+fun Modifier.lazyCardRow(index: Int, count: Int, dividerStart: Dp = Inset): Modifier = composed {
+    val c = Promtuz.colors
+    clip(groupedRoundShape(index, count, major = Radii.card.value.toInt(), minor = 0))
+        .background(c.card)
+        .drawWithContent {
+            drawContent()
+            if (index == 0) return@drawWithContent
+            val rtl = layoutDirection == LayoutDirection.Rtl
+            val y = 0.5.dp.toPx()
+            val a = dividerStart.toPx(); val b = size.width - Inset.toPx()
+            val (x0, x1) = if (rtl) size.width - b to size.width - a else a to b
+            drawLine(c.divider, Offset(x0, y), Offset(x1, y), 1.dp.toPx())
+        }
+}
 
 /** Vertical space between cards on a settings page. */
 @Composable
@@ -264,43 +295,10 @@ private fun <T> ChoicePopup(
     onDismiss: () -> Unit, onPick: (T) -> Unit,
 ) {
     val c = Promtuz.colors
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val shape = RoundedCornerShape(PickerRadius)
-    val host = androidx.compose.ui.platform.LocalView.current.rootView
-    androidx.compose.ui.window.Dialog(
-        onDismiss,
-        androidx.compose.ui.window.DialogProperties(
-            usePlatformDefaultWidth = false, decorFitsSystemWindows = false,
-            scrimAlpha = 0.2f, windowShape = shape,
-        ),
-    ) {
-        val view = androidx.compose.ui.platform.LocalView.current
-        val window = (view.parent as androidx.compose.ui.window.DialogWindowProvider).window
-        val blur = android.os.Build.VERSION.SDK_INT >= 31 && window.windowManager.isCrossWindowBlurEnabled
-        // The panel is its own window, so the platform blurs exactly what lies under it and the
-        // window's dim is the scrim.
-        // The platform rounds the blur from the background's round-rect outline, read when the blur is set.
-        androidx.compose.runtime.LaunchedEffect(Unit) {
-            window.setBackgroundDrawable(android.graphics.drawable.GradientDrawable().apply {
-                cornerRadius = with(density) { PickerRadius.toPx() }
-                setColor(android.graphics.Color.TRANSPARENT)
-            })
-            if (blur && android.os.Build.VERSION.SDK_INT >= 31) window.setBackgroundBlurRadius(with(density) { 32.dp.roundToPx() })
-        }
-        androidx.compose.runtime.SideEffect {
-            with(density) {
-                window.setWindowAnimations(com.promtuz.chat.R.style.AppModalAnimation)
-                window.setGravity(android.view.Gravity.CENTER)
-                window.setLayout(minOf(328.dp.roundToPx(), host.width - 32.dp.roundToPx()),
-                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
-            }
-        }
+    AppModal(onDismiss, maxWidth = 328.dp) {
         Column(
             Modifier.fillMaxWidth()
-                .heightIn(max = with(density) { host.height.toDp() } - 96.dp)
-                .clip(shape)
-                .background(if (blur) c.card.copy(alpha = 0.72f) else c.card)
-                .border(1.dp, c.glassEdge, shape)
+                .floatingSurface(ModalShape)
                 .verticalScroll(androidx.compose.foundation.rememberScrollState())
                 .padding(start = 8.dp, end = 8.dp, top = 20.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -312,7 +310,7 @@ private fun <T> ChoicePopup(
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
+                        .clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.tile))
                         .background(if (on) c.cardHigh else Color.Transparent)
                         .clickable(role = Role.RadioButton) { onPick(choice.value) }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -326,6 +324,3 @@ private fun <T> ChoicePopup(
         }
     }
 }
-
-private val PickerRadius = 28.dp
-

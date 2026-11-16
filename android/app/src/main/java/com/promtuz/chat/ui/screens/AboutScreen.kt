@@ -66,7 +66,7 @@ fun AboutScreen(onOpenLicenses: () -> Unit, onOpenHistory: () -> Unit, updates: 
                         withStyle(SpanStyle(color = c.text, fontWeight = FontWeight.Medium)) { append("Version ${BuildConfig.VERSION_NAME}") }
                         append(" · ${channelLabel(updates.installedChannel)}")
                     },
-                    Modifier.padding(top = 14.dp).clip(RoundedCornerShape(14.dp)).background(c.card)
+                    Modifier.padding(top = 14.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(c.card)
                         .padding(horizontal = 12.dp, vertical = 5.dp),
                     style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted,
                 )

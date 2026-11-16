@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.TextButton
 import com.promtuz.chat.ui.components.GroupedScreen
 import android.text.format.DateUtils
@@ -58,7 +59,7 @@ fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
             ) {
                 val tint = if (lastBackup != null) c.success else c.muted
                 Box(
-                    Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(tint.copy(alpha = 0.16f)),
+                    Modifier.size(48.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(tint.copy(alpha = 0.16f)),
                     contentAlignment = Alignment.Center,
                 ) { DrawableIcon(R.drawable.i_chat_backup, size = 24.dp, tint = tint) }
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {

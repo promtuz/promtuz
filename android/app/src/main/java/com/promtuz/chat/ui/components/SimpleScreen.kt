@@ -29,7 +29,7 @@ fun SimpleScreen(
     snackbarHost: @Composable () -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
     floatingActionButtonPosition: FabPosition = FabPosition.End,
-    containerColor: Color = MaterialTheme.colorScheme.background,
+    containerColor: Color = Promtuz.colors.page,
     content: @Composable ((PaddingValues) -> Unit)
 ) {
     ScreenScaffold(

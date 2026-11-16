@@ -85,12 +85,10 @@ import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.ComposerAction
 import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.ui.appearance.LocalChatColors
-import com.promtuz.chat.ui.appearance.chatBarHaze
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.util.freezeOnExit
 import com.promtuz.chat.utils.media.StickerImages
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
 import org.koin.androidx.compose.koinViewModel
 
 private val BarMarginH = 10.dp
@@ -217,11 +215,10 @@ fun ChatBottomBar(
             Modifier
                 .fillMaxWidth()
                 .padding(horizontal = BarMarginH, vertical = BarMarginV)
-                .clip(RoundedCornerShape(BarRadius))
                 // Freeze must sit on the same chain as the blur it bakes (screen-space
                 // Haze shatters under the exiting nav card's scale).
                 .freezeOnExit()
-                .hazeEffect(haze, chatBarHaze())
+                .frost(haze, FrostRole.ChatBar, RoundedCornerShape(BarRadius))
                 .padding(BarPad),
         ) {
             val request by viewModel.request.collectAsState()
@@ -299,6 +296,7 @@ fun ChatBottomBar(
                         photoPicker.launch(PickVisualMediaRequest(if (action is ComposerAction.Edit) ActivityResultContracts.PickVisualMedia.ImageOnly else ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                     },
                     onPickFiles = { filePicker.launch(arrayOf("*/*")) },
+                    onPickGalleryFiles = { filePicker.launch(arrayOf("image/*", "video/*")) },
                     onSendPhotos = { uris -> viewModel.attachPhotos(uris); closeFlat() },
                     onOpenCamera = {
                         if (viewModel.allowMedia()) com.promtuz.chat.ui.camera.CameraLauncher.open(conversation = viewModel.conversationHex) { file, video ->
@@ -363,7 +361,7 @@ private fun RequestRow(viewModel: ChatVM, onGone: () -> Unit) {
             TextButton(onClick = { confirming = RequestDecision.Block }) { Text("Block", color = colors.error) }
             TextButton(onClick = { confirming = RequestDecision.Delete }) { Text("Delete") }
             Spacer(Modifier.weight(1f))
-            Button(onClick = { viewModel.acceptRequest() }) { Text("Accept") }
+            AppButton("Accept", { viewModel.acceptRequest() })
         }
     }
     confirming?.let { decision ->

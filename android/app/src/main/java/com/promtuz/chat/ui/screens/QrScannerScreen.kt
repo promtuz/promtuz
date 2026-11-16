@@ -1,7 +1,8 @@
 package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.components.IconButton
-import com.promtuz.chat.ui.components.Button
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -145,13 +146,13 @@ private fun BoxScope.PermissionDenied() {
             color = MaterialTheme.colorScheme.onBackground,
             textAlign = TextAlign.Center
         )
-        Button({
+        AppButton("Open Settings", {
             context.startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = Uri.fromParts("package", context.packageName, null)
                 }
             )
-        }) { Text("Open Settings") }
+        })
     }
 }
 

@@ -33,9 +33,6 @@ object Routes : NavKey {
     data object Profile : NavKey
 
     @Serializable
-    data object EditProfile : NavKey
-
-    @Serializable
     data class LockChat(val conversation: String) : NavKey
 
     @Serializable
@@ -76,9 +73,6 @@ object Routes : NavKey {
 
     @Serializable
     data object RestorePhrase : NavKey
-
-    @Serializable
-    data object IdentityKeys : NavKey
 
     @Serializable
     data object RecoveryPhrase : NavKey

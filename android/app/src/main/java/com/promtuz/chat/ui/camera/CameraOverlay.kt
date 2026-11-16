@@ -1,6 +1,7 @@
 package com.promtuz.chat.ui.camera
 
-import com.promtuz.chat.ui.components.Button
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -206,7 +207,7 @@ private fun CameraBody(request: CameraRequest, onClose: () -> Unit) {
             Image(painterResource(R.drawable.ic_camera_permission), null, Modifier.size(96.dp).graphicsLayer { alpha = 0.6f })
             Text("Allow camera access to take photos here", color = Color.White,
                 style = MaterialTheme.typography.titleMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-            Button(::requestPermission) { Text("Allow") }
+            AppButton("Allow", ::requestPermission)
             CloseButton(onClose, Modifier)
         }
     }

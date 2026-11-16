@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -98,7 +99,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
         ) {
-            Button(onClick = requestAccess) { Text("Allow photo access") }
+            AppButton("Allow photo access", requestAccess)
             TextButton(onClick = onOpenSystemPicker) { Text("Open gallery") }
         }
         return
@@ -203,26 +204,8 @@ private fun PhotoCell(item: GalleryItem, order: Int, onToggle: () -> Unit) {
 
 @Composable
 private fun SendFab(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val accent = LocalChatColors.current.accent
-    Box(
-        modifier
-            .clip(RoundedCornerShape(percent = 50))
-            .background(accent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 12.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                "$count",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onPrimary,
-            )
-            DrawableIcon(
-                R.drawable.i_send,
-                Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.onPrimary,
-            )
-        }
+    AppButton(onClick, modifier) {
+        Text("$count")
+        DrawableIcon(R.drawable.i_send, size = 20.dp, tint = LocalContentColor.current)
     }
 }

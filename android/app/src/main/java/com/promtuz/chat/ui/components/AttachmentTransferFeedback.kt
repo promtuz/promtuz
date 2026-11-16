@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import android.media.MediaMetadataRetriever
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedContent
@@ -135,7 +137,7 @@ internal fun TransferControl(
                     5 -> CircularProgressIndicator(Modifier.size(28.dp), color, strokeWidth = 2.dp)
                     4 -> DrawableIcon(R.drawable.oi_info, Modifier.size(24.dp), tint = color)
                     else -> DrawableIcon(R.drawable.ic_media_download, Modifier.size(24.dp),
-                        tint = if (shown == 3) MaterialTheme.colorScheme.error else color)
+                        tint = if (shown == 3) Promtuz.colors.danger else color)
                 }
             }
         }
@@ -221,7 +223,6 @@ private fun AttachmentTransferSheet(
         catch (_: Exception) { failed = true }
     }
     val context = LocalContext.current
-    val colors = MaterialTheme.colorScheme
     val maxHeight = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() } * 0.8f
     val sheetState = rememberBottomSheetState(
         initialValue = SheetValue.Hidden,
@@ -245,7 +246,7 @@ private fun AttachmentTransferSheet(
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("Transfer details", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
                     IconButton({ scope.launch { sheetState.hide(); onDismiss() } }) {
-                        MorphIcon(MorphGlyph.Close, "Close", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
+                        MorphIcon(MorphGlyph.Close, "Close", Modifier.size(20.dp), tint = Promtuz.colors.muted)
                     }
                 }
             }
@@ -253,9 +254,9 @@ private fun AttachmentTransferSheet(
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     Box(Modifier.size(56.dp).clip(MaterialTheme.shapes.medium)
-                        .background(colors.surfaceContainerHighest), contentAlignment = Alignment.Center) {
+                        .background(Promtuz.colors.cardHigh), contentAlignment = Alignment.Center) {
                         att.thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-                            ?: FileGlyph(att.mime, colors.onSurfaceVariant, colors.primary)
+                            ?: FileGlyph(att.mime, Promtuz.colors.muted, Promtuz.colors.accentFill)
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(att.name, style = MaterialTheme.typography.titleMedium,
@@ -264,7 +265,7 @@ private fun AttachmentTransferSheet(
                         Text(listOfNotNull(Formatter.formatShortFileSize(context, att.size), source?.let {
                             if (feedback.outgoing) "To $it" else "Source: $it"
                         }).joinToString(" · "),
-                            style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                            style = MaterialTheme.typography.bodyMedium, color = Promtuz.colors.muted)
                     }
                 }
             }
@@ -279,7 +280,7 @@ private fun AttachmentTransferSheet(
             } else if (rows.isNullOrEmpty()) item {
                 if (rows == null && !failed) LinearProgressIndicator(Modifier.fillMaxWidth())
                 else Text("Not currently sending", style = MaterialTheme.typography.bodyMedium,
-                    color = colors.onSurfaceVariant)
+                    color = Promtuz.colors.muted)
             } else items(rows.orEmpty(), key = { it.peer.toHex() }) { row ->
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (single == null) Text("To ${row.peerName}", style = MaterialTheme.typography.titleSmall)
@@ -287,25 +288,23 @@ private fun AttachmentTransferSheet(
                 }
             }
             if (download != null && !feedback.outgoing && feedback.state in setOf(0, 3, 4)) item {
-                Button(download, Modifier.fillMaxWidth()) {
-                    Text(if (feedback.state == 3) "Retry download" else "Download")
-                }
+                AppButton(if (feedback.state == 3) "Retry download" else "Download", download, Modifier.fillMaxWidth())
             }
             if (open != null) item {
-                Button({ scope.launch { sheetState.hide(); onDismiss(); open() } }, Modifier.fillMaxWidth()) {
-                    Text(if (att.mime.startsWith("video/")) "Open video" else
-                        if (att.mime.startsWith("image/")) "Open image" else "Open file")
-                }
+                AppButton(
+                    if (att.mime.startsWith("video/")) "Open video" else if (att.mime.startsWith("image/")) "Open image" else "Open file",
+                    { scope.launch { sheetState.hide(); onDismiss(); open() } }, Modifier.fillMaxWidth(),
+                )
             }
             if (technical.isNotEmpty()) item {
                 Column {
-                    HorizontalDivider(color = colors.outlineVariant)
+                    HorizontalDivider(color = Promtuz.colors.divider)
                     Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }
                         .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
                         .padding(vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("File parts", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
                         MorphIcon(if (expanded) MorphGlyph.ChevronUp else MorphGlyph.ChevronDown,
-                            null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                            null, Modifier.size(16.dp), tint = Promtuz.colors.muted)
                     }
                     AnimatedVisibility(expanded,
                         enter = expandVertically(ChatMotion.spec()) + fadeIn(ChatMotion.spec()),
@@ -313,7 +312,7 @@ private fun AttachmentTransferSheet(
                         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             if (!feedback.outgoing && att.transferTotal > 0) Row(Modifier.fillMaxWidth()) {
                                 Text("Verified chunks", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant)
+                                    color = Promtuz.colors.muted)
                                 Text("${att.transferHave} / ${att.transferTotal}", style = MaterialTheme.typography.bodySmall)
                             }
                             technical.forEach { row ->
@@ -321,7 +320,7 @@ private fun AttachmentTransferSheet(
                                 ChunkMap(row)
                             }
                             if (feedback.outgoing) Text("Only this device’s activity is shown. Sent bytes aren’t a download receipt.",
-                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                style = MaterialTheme.typography.bodySmall, color = Promtuz.colors.muted)
                         }
                     }
                 }
@@ -333,7 +332,6 @@ private fun AttachmentTransferSheet(
 @Composable
 private fun TransferProgress(feedback: AttachmentFeedback, row: AttachmentTransferRecord?) {
     val context = LocalContext.current
-    val colors = MaterialTheme.colorScheme
     val complete = !feedback.outgoing && feedback.state == 2
     val fraction = if (complete) 1.0 else row?.takeIf { it.total > 0uL }
         ?.let { (it.bytes.toDouble() / it.total.toDouble()).coerceIn(0.0, 1.0) }
@@ -358,7 +356,7 @@ private fun TransferProgress(feedback: AttachmentFeedback, row: AttachmentTransf
                 roundingMode = java.math.RoundingMode.DOWN
             }.format(fraction),
                 style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
-                color = colors.onSurfaceVariant)
+                color = Promtuz.colors.muted)
         }
         if (fraction == null && feedback.state in setOf(1, 5)) LinearProgressIndicator(Modifier.fillMaxWidth())
         else {
@@ -373,12 +371,12 @@ private fun TransferProgress(feedback: AttachmentFeedback, row: AttachmentTransf
                 else -> null
             }
             bytes?.let { Text(it, style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant) }
+                color = Promtuz.colors.muted) }
             if (!complete && row?.active == true && row.bytesPerSecond > 0uL) {
                 Text(listOfNotNull("${Formatter.formatShortFileSize(context, row.bytesPerSecond.toLong())}/s",
                     row.remainingSeconds?.let { "~${clock(it.toLong() * 1000)} left" }).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
-                    color = colors.onSurfaceVariant)
+                    color = Promtuz.colors.muted)
             }
         }
     }
@@ -386,7 +384,7 @@ private fun TransferProgress(feedback: AttachmentFeedback, row: AttachmentTransf
 
 @Composable
 private fun ChunkMap(row: AttachmentTransferRecord) {
-    val colors = MaterialTheme.colorScheme
+    val c = Promtuz.colors
     val description = if (row.outgoing) "File parts sent to the connection" else "Verified file parts"
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         BoxWithConstraints {
@@ -404,11 +402,11 @@ private fun ChunkMap(row: AttachmentTransferRecord) {
                     val cell = androidx.compose.ui.geometry.Size((step - 3.dp.toPx()).coerceAtLeast(0f), 9.dp.toPx())
                     val origin = androidx.compose.ui.geometry.Offset(left, top)
                     val radius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx())
-                    drawRoundRect(colors.outlineVariant, origin, cell, radius)
+                    drawRoundRect(c.divider, origin, cell, radius)
                     val fraction = if (group.total == 0u) 0f else
                         (group.completed.toFloat() / group.total.toFloat()).coerceIn(0f, 1f)
                     clipRect(left, top, left + cell.width * fraction, top + cell.height) {
-                        drawRoundRect(colors.primary, origin, cell, radius)
+                        drawRoundRect(c.accentFill, origin, cell, radius)
                     }
                 }
             }
@@ -416,14 +414,14 @@ private fun ChunkMap(row: AttachmentTransferRecord) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf((if (row.outgoing) "Sent" else "Verified") to 1f, "Partial" to 0.5f, "Missing" to 0f).forEach { (label, fraction) ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(colors.outlineVariant)) {
-                        Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(colors.primary))
+                    Box(Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(Promtuz.colors.divider)) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).background(Promtuz.colors.accentFill))
                     }
-                    Text(label, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    Text(label, style = MaterialTheme.typography.bodySmall, color = Promtuz.colors.muted)
                 }
             }
         }
         Text("Blocks summarize neighboring file parts.", style = MaterialTheme.typography.bodySmall,
-            color = colors.onSurfaceVariant)
+            color = Promtuz.colors.muted)
     }
 }

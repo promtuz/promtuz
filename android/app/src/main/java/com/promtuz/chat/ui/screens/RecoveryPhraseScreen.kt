@@ -1,8 +1,22 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
+import com.promtuz.chat.navigation.Routes
+import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.ui.components.*
+import com.promtuz.chat.ui.theme.Promtuz
+import org.koin.compose.koinInject
 import com.promtuz.chat.ui.components.TextButton
 import com.promtuz.chat.ui.components.IconButton
-import com.promtuz.chat.ui.components.Button
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import android.app.Activity
 import android.content.Intent
 import android.os.Build
@@ -21,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -158,7 +173,9 @@ fun RecoveryPhraseScreen() {
         }
     }
 
+    val app = koinInject<AppVM>()
     RecoveryPhraseContent(state, hasScreenLock, settingsError,
+        onBackup = { app.navigator.push(Routes.BackupRestore) },
         onReveal = { reveal(false) }, onUseCredentials = { reveal(true) },
         onHide = {
             session.lock(if (state is RecoveryPhraseState.Revealed) RecoveryNotice.Hidden else RecoveryNotice.Cancelled)
@@ -177,108 +194,116 @@ internal fun RecoveryPhraseContent(
     state: RecoveryPhraseState,
     hasScreenLock: Boolean,
     settingsError: Boolean,
+    onBackup: () -> Unit,
     onReveal: () -> Unit,
     onUseCredentials: () -> Unit,
     onHide: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val colors = MaterialTheme.colorScheme
-    val typography = MaterialTheme.typography
-    SimpleScreen(
+    val c = Promtuz.colors
+    val revealed = state as? RecoveryPhraseState.Revealed
+    val busy = revealed == null && state !is RecoveryPhraseState.Locked
+    val error = (state as? RecoveryPhraseState.Locked)?.notice
+        ?.takeIf { it != RecoveryNotice.Cancelled && it != RecoveryNotice.Hidden }
+    GroupedScreen(
         { Text(stringResource(R.string.recovery_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        connectionStatus = false,
         actions = {
-            if (state is RecoveryPhraseState.Revealed) {
-                IconButton(onHide, Modifier.testTag("recovery-hide-top")) {
-                    Icon(painterResource(R.drawable.i_shield_lock), stringResource(R.string.recovery_hide))
-                }
+            if (revealed != null) IconButton(onHide, Modifier.testTag("recovery-hide-top")) {
+                Icon(painterResource(R.drawable.oi_eye_slash), stringResource(R.string.recovery_hide))
             }
         },
     ) { padding ->
-        Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding)
-                .padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = padding.listPadding(top = 6.dp, bottom = 40.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(stringResource(R.string.recovery_intro_body), style = typography.bodyMedium, color = colors.onSurfaceVariant)
-            }
-            Text(stringResource(R.string.recovery_private_body), style = typography.bodyMedium,
-                color = colors.onSurface)
-            if (state is RecoveryPhraseState.Revealed) {
-                Column {
-                    Text(stringResource(R.string.recovery_words_label), style = typography.titleSmall)
-                    Text(stringResource(R.string.recovery_words_instruction), style = typography.bodySmall, color = colors.onSurfaceVariant)
-                }
-                RecoveryWordGrid(state.words)
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(stringResource(R.string.recovery_auto_hide), style = typography.bodySmall, color = colors.onSurfaceVariant)
-                    TextButton(onHide, Modifier.align(Alignment.End).testTag("recovery-hide-bottom")) {
-                        Text(stringResource(R.string.recovery_hide))
+            item("phrase") {
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.card)).background(c.card)
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Box {
+                        RecoveryWordGrid(revealed?.words)
+                        if (revealed == null) Column(
+                            Modifier.matchParentSize().clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.field)).background(c.card.copy(alpha = 0.2f)),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+                        ) {
+                            DrawableIcon(R.drawable.oi_eye_slash, tint = c.text, size = 26.dp)
+                            Text(
+                                stringResource(if (hasScreenLock) R.string.recovery_locked_title else R.string.recovery_no_lock_title),
+                                style = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
+                                color = c.text,
+                            )
+                        }
+                    }
+                    when {
+                        revealed != null -> AppButton(stringResource(R.string.recovery_hide), onHide,
+                            Modifier.fillMaxWidth().testTag("recovery-hide-bottom"), kind = ButtonKind.Tonal)
+                        !hasScreenLock -> AppButton(stringResource(R.string.recovery_open_settings), onOpenSettings, Modifier.fillMaxWidth())
+                        else -> AppButton(stringResource(R.string.recovery_reveal), onReveal, Modifier.fillMaxWidth(), busy = busy)
+                    }
+                    val note = when {
+                        settingsError -> stringResource(R.string.recovery_settings_unavailable)
+                        error != null -> stringResource(error.messageResource())
+                        revealed != null -> stringResource(R.string.recovery_auto_hide)
+                        else -> null
+                    }
+                    note?.let {
+                        Text(it, Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+                            style = FootnoteStyle, color = if (settingsError || error != null) c.danger else c.muted,
+                            textAlign = TextAlign.Center)
+                    }
+                    if (revealed == null && hasScreenLock && !busy && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        TextButton(onUseCredentials, Modifier.align(Alignment.CenterHorizontally)) {
+                            Text(stringResource(R.string.recovery_use_screen_lock))
+                        }
                     }
                 }
-            } else {
-                val busy = state !is RecoveryPhraseState.Locked
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(stringResource(if (hasScreenLock) R.string.recovery_locked_title else R.string.recovery_no_lock_title),
-                            style = typography.titleMedium)
-                        Text(stringResource(if (hasScreenLock) R.string.recovery_locked_body else R.string.recovery_no_lock_body),
-                            style = typography.bodyMedium, color = colors.onSurfaceVariant)
-                        if (state is RecoveryPhraseState.Locked && state.notice != null) {
-                            val isError = state.notice !in listOf(RecoveryNotice.Cancelled, RecoveryNotice.Hidden)
-                            Text(stringResource(state.notice.messageResource()),
-                                Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                                style = typography.bodyMedium, color = if (isError) colors.error else colors.onSurfaceVariant)
-                        }
-                        if (settingsError) Text(stringResource(R.string.recovery_settings_unavailable), color = colors.error)
-                        if (!hasScreenLock) {
-                            Button(onOpenSettings, Modifier.fillMaxWidth()) { Text(stringResource(R.string.recovery_open_settings)) }
-                        } else if (busy) {
-                            Row(Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
-                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                                Text(stringResource(if (state == RecoveryPhraseState.Loading) R.string.recovery_loading else R.string.recovery_verifying),
-                                    style = typography.bodyMedium)
-                            }
-                            TextButton(onHide, Modifier.fillMaxWidth()) { Text(stringResource(R.string.recovery_cancel)) }
-                        } else {
-                            Button(onReveal, Modifier.fillMaxWidth()) { Text(stringResource(R.string.recovery_reveal)) }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                TextButton(onUseCredentials, Modifier.fillMaxWidth()) {
-                                    Text(stringResource(R.string.recovery_use_screen_lock))
-                                }
-                            }
-                        }
+            }
+            item("note") {
+                Text(stringResource(R.string.recovery_intro_body), Modifier.padding(horizontal = 16.dp),
+                    style = FootnoteStyle, color = c.muted)
+            }
+            item("backup") {
+                SettingsCard {
+                    SettingsRow("Chat backup", icon = R.drawable.i_chat_backup, trailing = Trailing.Chevron, onClick = onBackup)
                 }
             }
-            Text(stringResource(R.string.identity_history_note), Modifier.padding(horizontal = 4.dp),
-                style = typography.bodySmall, color = colors.onSurfaceVariant)
         }
     }
 }
 
+/** Without [words] it draws blurred stand-ins, so the hidden state never holds the real phrase. */
 @Composable
-private fun RecoveryWordGrid(words: List<String>) {
+private fun RecoveryWordGrid(words: List<String>?) {
+    val c = Promtuz.colors
     val fontScale = LocalDensity.current.fontScale
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val columns = when {
-            maxWidth / fontScale < 280.dp -> 1
-            maxWidth / fontScale < 440.dp -> 2
-            else -> 3
-        }
+        val columns = if (maxWidth / fontScale < 300.dp) 2 else 3
+        val shown = words ?: StandIns
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            words.chunked(columns).forEachIndexed { rowIndex, row ->
+            shown.chunked(columns).forEachIndexed { rowIndex, row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEachIndexed { columnIndex, word ->
                         val number = rowIndex * columns + columnIndex + 1
                         val description = stringResource(R.string.recovery_word_description, number, word)
-                        Row(Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                            .clearAndSetSemantics { contentDescription = description }
-                            .padding(horizontal = 12.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text(number.toString(), style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(word, style = MaterialTheme.typography.bodyLarge, fontFamily = FontFamily.Monospace)
+                        Row(
+                            Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)).background(c.cardHigh)
+                                .then(if (words == null) Modifier.clearAndSetSemantics { } else Modifier.clearAndSetSemantics { contentDescription = description })
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(number.toString(), style = TextStyle(fontSize = 12.sp, lineHeight = 16.sp), color = c.muted)
+                            // Blur needs API 31; older devices get a plain bar of the same width.
+                            if (words == null && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) Box(Modifier.width((word.length * 8).dp)
+                                .height(10.dp).clip(RoundedCornerShape(5.dp)).background(c.muted.copy(alpha = 0.3f)))
+                            else Text(word, Modifier.then(if (words == null) Modifier.blur(7.dp) else Modifier),
+                                style = TextStyle(fontSize = 15.sp, lineHeight = 20.sp), color = c.text, maxLines = 1)
                         }
                     }
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
@@ -287,6 +312,11 @@ private fun RecoveryWordGrid(words: List<String>) {
         }
     }
 }
+
+private val StandIns = listOf(
+    "orbit", "maple", "candle", "river", "quartz", "lemon", "harbor", "velvet", "tiger", "pencil", "meadow", "copper",
+    "falcon", "nectar", "summit", "willow", "ember", "garden", "rocket", "violet", "anchor", "pebble", "breeze", "island",
+)
 
 private fun RecoveryNotice.messageResource(): Int = when (this) {
     RecoveryNotice.Cancelled -> R.string.recovery_cancelled

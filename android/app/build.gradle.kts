@@ -346,7 +346,9 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.google.material)
-    implementation(libs.haze.materials)
+    implementation(libs.haze)
+    implementation(libs.haze.blur)
+    implementation(libs.haze.glass)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

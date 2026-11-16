@@ -1,5 +1,20 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.size
+import androidx.annotation.DrawableRes
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import com.promtuz.chat.R
+import com.promtuz.chat.ui.theme.Promtuz
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import android.net.Uri
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -36,10 +51,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.appearance.LocalChatColors
-import com.promtuz.chat.ui.appearance.chatBarHaze
 import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
@@ -101,9 +114,8 @@ fun ComposerPanel(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .height(with(density) { panelH.toDp() })
-                    .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
                     .freezeOnExit()
-                    .hazeEffect(haze, chatBarHaze()),
+                    .frost(haze, FrostRole.Sheet, PanelShape),
             ) {
                 content()
             }
@@ -111,66 +123,43 @@ fun ComposerPanel(
     }
 }
 
+private val PanelShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+
 @Composable
 fun AttachPanelBody(
     allowPhotos: Boolean,
     allowFiles: Boolean,
     onPickPhotos: () -> Unit,
     onPickFiles: () -> Unit,
+    onPickGalleryFiles: () -> Unit,
     onSendPhotos: (List<Uri>) -> Unit,
     onOpenCamera: () -> Unit,
 ) {
     var tab by remember(allowPhotos) { mutableStateOf(if (allowPhotos) 0 else 1) }
+    val local = rememberHazeState()
 
     Box(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().navigationBarsPadding(), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize().hazeSource(local)) {
             if (tab == 0) PhotoGrid(onSend = onSendPhotos, onOpenSystemPicker = onPickPhotos, onOpenCamera = onOpenCamera)
-            else PlaceholderAction("Browse files", onPickFiles)
+            else FilesTab(onPickFiles, onPickGalleryFiles.takeIf { allowPhotos })
         }
-
-        Row(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (allowPhotos) PillTab("Photos", tab == 0) { tab = 0 }
-            if (allowFiles) PillTab("Files", tab == 1) { tab = 1 }
+        if (allowPhotos && allowFiles) GlassTabBar(local, Modifier.align(Alignment.BottomCenter)) {
+            GlassTab("Gallery", R.drawable.oi_image, tab == 0) { tab = 0 }
+            GlassTab("Files", R.drawable.oi_file_attachment, tab == 1) { tab = 1 }
         }
     }
 }
 
-@Composable
-private fun PillTab(label: String, selected: Boolean, onClick: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    val accent = LocalChatColors.current.accent
-    val shape = RoundedCornerShape(percent = 50)
-    Box(
-        Modifier
-            .clip(shape)
-            .background(if (selected) accent else colors.surfaceVariant.copy(alpha = 0.7f))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) colors.onPrimary else colors.onSurfaceVariant,
-        )
-    }
-}
 
 @Composable
-fun PlaceholderAction(label: String, onClick: () -> Unit) {
-    val accent = LocalChatColors.current.accent
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 28.dp, vertical = 16.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, style = MaterialTheme.typography.titleMedium, color = accent)
+private fun FilesTab(onBrowse: () -> Unit, onGalleryFiles: (() -> Unit)?) {
+    Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 12.dp, top = 12.dp)) {
+        SettingsCard {
+            SettingsRow("Browse files", icon = R.drawable.oi_file_attachment, titleColor = Promtuz.colors.accent, onClick = onBrowse)
+            if (onGalleryFiles != null) SettingsRow(
+                "Gallery as files", subtitle = "Send photos without compression",
+                icon = R.drawable.oi_image, trailing = Trailing.Chevron, onClick = onGalleryFiles,
+            )
+        }
     }
 }

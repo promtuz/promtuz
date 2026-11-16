@@ -29,6 +29,7 @@ import androidx.navigation3.runtime.entryProvider
 import com.promtuz.chat.navigation.NavStage
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.ui.components.*
+import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.theme.PromtuzTheme
 import com.promtuz.chat.utils.extensions.*
 import com.promtuz.chat.utils.media.*
@@ -151,14 +152,14 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
 
     @Composable fun Picks() {
         val records by staged.collectAsState()
-        owned.toList().forEach { pick ->
+        if (owned.isNotEmpty()) SettingsCard { owned.toList().forEach { pick ->
             val state = records.firstOrNull { it.id == pick.id }
-            ListItem(leadingContent = { pick.preview?.let { Image(it, null, Modifier.size(48.dp)) } },
-                supportingContent = { if (state?.state?.toInt() != 1) Text(if (state?.state?.toInt() == 2) "Couldn't prepare attachment" else "Preparing…") },
-                trailingContent = { IconButton(enabled = !busy && pick.id !in removing, onClick = { remove(pick.id) }) { DrawableIcon(R.drawable.oi_trash, desc = "Remove attachment") } }) {
-                Text(pick.name, maxLines = 2)
-            }
-        }
+            SettingsRow(pick.name,
+                subtitle = if (state?.state?.toInt() != 1) (if (state?.state?.toInt() == 2) "Couldn't prepare attachment" else "Preparing…") else null,
+                leading = pick.preview?.let { { Image(it, null, Modifier.size(48.dp)) } }, leadingSize = 48.dp,
+                trailingContent = { AppIconButton(R.drawable.oi_trash, "Remove attachment", { remove(pick.id) },
+                    enabled = !busy && pick.id !in removing, tint = Promtuz.colors.muted) })
+        } }
     }
 
     fun canSend(records: List<uniffi.core.StagedRecord>) = !busy && removing.isEmpty() && (text.isNotBlank() || owned.isNotEmpty()) &&
@@ -220,9 +221,8 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
             LazyColumn(contentPadding = PaddingValues(bottom = padding.calculateBottomPadding() + 16.dp)) {
                 if (recipients.isEmpty()) item { Text("No chats yet", Modifier.padding(24.dp)) }
                 items(recipients.filter { it.name.contains(model.query, ignoreCase = true) }, key = { it.conversation }) { (conv, name, group, peer) ->
-                    ListItem(modifier = Modifier.clickable { model.stack.add(ShareReview(conv, name)) },
-                        leadingContent = { if (group) GroupAvatar(name, emptyList(), conversation = conv) else Avatar(name, identityKey = peer ?: conv, image = rememberAvatar(peer)) },
-                    ) { Text(name) }
+                    SettingsRow(name, onClick = { model.stack.add(ShareReview(conv, name)) }, leadingSize = 52.dp,
+                        leading = { if (group) GroupAvatar(name, emptyList(), conversation = conv) else Avatar(name, identityKey = peer ?: conv, image = rememberAvatar(peer)) })
                 }
             }
         }

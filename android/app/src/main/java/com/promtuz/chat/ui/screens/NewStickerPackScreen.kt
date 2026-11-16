@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -138,7 +139,7 @@ fun NewStickerPackScreen(
 private fun AddTile(decoding: Boolean, onClick: () -> Unit) {
     val c = Promtuz.colors
     Column(
-        Modifier.fillMaxSize().clip(RoundedCornerShape(18.dp)).background(c.cardHigh).clickable(enabled = !decoding, onClick = onClick),
+        Modifier.fillMaxSize().clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.tile)).background(c.cardHigh).clickable(enabled = !decoding, onClick = onClick),
         verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import dev.chrisbanes.haze.HazeState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -87,6 +88,7 @@ fun MessageContextMenu(
     state: MessageMenuState,
     quickReactions: List<String>,
     actionGroups: List<List<MenuAction>>,
+    haze: HazeState,
     iconSize: Dp = MenuIconSize,
     anchorOffsetY: () -> Float = { 0f },
 ) {
@@ -101,7 +103,7 @@ fun MessageContextMenu(
     val density = LocalDensity.current
 
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
-        MenuBackdrop(state, dim = 0.2f, scrimMs = 320, popMs = 250, exitMs = 160)
+        MenuBackdrop(state, haze, dim = 0.2f, scrimMs = 320, popMs = 250, exitMs = 160)
 
         // Laid out at the captured row width so it wraps exactly as it did in the list.
         Box(
@@ -135,7 +137,7 @@ fun MessageContextMenu(
                 .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
                 .onGloballyPositioned { stackOrigin = it.positionInRoot() },
         ) {
-            MenuStack(state, anchor, quickReactions, actionGroups, iconSize, stackOrigin, shift)
+            MenuStack(state, anchor, quickReactions, actionGroups, haze, iconSize, stackOrigin, shift)
         }
     }
 }
@@ -146,6 +148,7 @@ private fun MenuStack(
     anchor: MenuAnchor,
     quickReactions: List<String>,
     actionGroups: List<List<MenuAction>>,
+    haze: HazeState,
     iconSize: Dp = MenuIconSize,
     origin: Offset,
     shift: MutableFloatState,
@@ -172,13 +175,14 @@ private fun MenuStack(
 
     Layout(
         content = {
-            ReactionStrip(state, anchor.msg, quickReactions, entrance)
+            ReactionStrip(state, anchor.msg, quickReactions, haze, entrance)
             MenuCard(
                 groups = actionGroups,
                 hovered = state.hovered - quickReactions.size,
                 modifier = cardEntrance,
                 itemHeight = 42.dp,
                 iconSize = iconSize,
+                haze = haze,
                 onRowPositioned = { i, coords -> state.targets[quickReactions.size + i] = coords },
                 onPick = { it.onClick() },
             )
@@ -226,13 +230,13 @@ private fun ReactionStrip(
     state: MessageMenuState,
     msg: UiMessage,
     emojis: List<String>,
+    haze: HazeState,
     modifier: Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
     Row(
         modifier
-            .clip(RoundedCornerShape(24.dp))
-            .background(colors.surfaceContainerHigh)
+            .floatingSurface(RoundedCornerShape(50), haze)
             .padding(horizontal = 5.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

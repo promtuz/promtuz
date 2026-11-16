@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -104,7 +106,7 @@ fun Avatar(
                     .align(Alignment.BottomEnd)
                     .size(dot)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surface)
+                    .background(Promtuz.colors.page)
                     .padding(dot * 0.2f)
                     .clip(CircleShape)
                     .background(statusColor)

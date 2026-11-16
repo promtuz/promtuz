@@ -38,12 +38,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.R
-import com.promtuz.chat.ui.components.MorphGlyph
-import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.ui.components.ScreenScaffold
 import com.promtuz.chat.ui.components.SearchableHeader
 import com.promtuz.chat.ui.components.DrawableIcon
-import com.promtuz.chat.ui.components.GroupedActionRow
+import com.promtuz.chat.ui.components.SettingsRow
+import com.promtuz.chat.ui.components.Trailing
+import com.promtuz.chat.ui.components.lazyCardRow
 import com.promtuz.chat.ui.components.GroupedScreen
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -52,7 +52,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
-import com.promtuz.chat.ui.components.Radii
+import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.RowSubtitleStyle
 import com.promtuz.chat.ui.components.RowTitleStyle
 import com.promtuz.chat.ui.theme.Promtuz
@@ -120,11 +120,12 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
                     Text("No libraries found", Modifier.padding(16.dp), style = RowSubtitleStyle, color = Promtuz.colors.muted)
                 }
                 else -> itemsIndexed(libraries, key = { _, library -> library.id }) { index, library ->
-                    GroupedActionRow(
-                        library.name, index, libraries.size,
+                    SettingsRow(
+                        library.name,
+                        Modifier.lazyCardRow(index, libraries.size),
+                        subtitle = "${library.version} · ${library.license}",
+                        trailing = Trailing.Chevron,
                         onClick = { onLibraryClick(library.id) },
-                        supportingText = "${library.version} · ${library.license}",
-                        control = { MorphIcon(MorphGlyph.ChevronRight, null, Modifier.size(18.dp), tint = Promtuz.colors.muted) },
                     )
                 }
             }

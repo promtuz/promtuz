@@ -25,6 +25,11 @@ import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.promtuz.chat.ui.theme.Promtuz
+import com.promtuz.chat.ui.text.ttCommonsProFamily
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 
 @Composable
 fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Unit) {
@@ -83,6 +88,9 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
     }
     fun erase() { if (!busy && !done) code = code.dropLast(1) }
 
+    val app = org.koin.compose.koinInject<com.promtuz.chat.presentation.viewmodel.AppVM>()
+    val chats by app.chats.collectAsState()
+    val chat = chats.firstOrNull { it.conversationHex == conversation }
     val keys = remember { FocusRequester() }
     LaunchedEffect(pin) { if (pin) keys.requestFocus() }
 
@@ -94,14 +102,6 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
                 TopBarMorphIcon(MorphGlyph.Back, "Back")
             }
         },
-        actions = {
-            AppDropMenu(
-                anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Lock options") },
-                groups = listOf(listOf(MenuAction(if (pin) "Use a password instead" else "Use a PIN instead") {
-                    if (!busy) { pin = !pin; restart() }
-                })),
-            )
-        },
     ) { padding ->
         Column(
             Modifier.fillMaxSize().padding(top = padding.calculateTopPadding()).consumeWindowInsets(padding).imePadding()
@@ -109,18 +109,18 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.weight(1f))
-            DrawableIcon(R.drawable.oi_lock_chat, size = 40.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(16.dp))
+            LockedAvatar(chat?.name.orEmpty(), chat, conversation, 72.dp)
+            Spacer(Modifier.height(20.dp))
             AnimatedContent(first != null, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
                 label = "step") { confirming ->
                 Column(Modifier.padding(horizontal = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(if (confirming) "Re-enter your code" else "Create a code", style = MaterialTheme.typography.headlineSmall)
+                    Text(if (confirming) "Re-enter your code" else "Create a code", style = LockTitleStyle, color = Promtuz.colors.text)
                     Spacer(Modifier.height(8.dp))
                     Text(
                         if (confirming) "If you forget it, resetting deletes this chat's history."
-                        else "You'll need it to open this chat. Its notifications turn off.",
-                        style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center, minLines = 2,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        else "You'll need it to open this chat.\nIt won't send notifications.",
+                        style = LockBodyStyle, textAlign = TextAlign.Center, minLines = 2,
+                        color = Promtuz.colors.muted,
                     )
                 }
             }
@@ -128,9 +128,12 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
             if (pin) CodeBoxes(code, done, Modifier.shake(shakes))
             else PasswordField(code, { if (!busy && !done) code = it }, enabled = !busy && !done,
                 onDone = ::submit, modifier = Modifier.shake(shakes))
-            Box(Modifier.height(44.dp), contentAlignment = Alignment.Center) {
-                androidx.compose.animation.AnimatedVisibility(error != null, enter = fadeIn(), exit = fadeOut()) {
-                    Text(error.orEmpty(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+            Box(Modifier.height(52.dp), contentAlignment = Alignment.Center) {
+                Crossfade(error, animationSpec = tween(180), label = "hint") { message ->
+                    if (message != null) Text(message, style = LockBodyStyle, color = Promtuz.colors.danger)
+                    else if (first == null) TextButton(onClick = { if (!busy) { pin = !pin; restart() } }, enabled = !busy && !done) {
+                        Text(if (pin) "Use a password instead" else "Use a code instead")
+                    }
                 }
             }
             Spacer(Modifier.weight(1f))
@@ -139,3 +142,6 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
         }
     }
 }
+
+private val LockTitleStyle = TextStyle(fontFamily = ttCommonsProFamily, fontWeight = FontWeight.SemiBold, fontSize = 24.sp, lineHeight = 30.sp)
+private val LockBodyStyle = TextStyle(fontSize = 15.sp, lineHeight = 20.sp)

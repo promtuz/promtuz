@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -198,12 +199,12 @@ private fun ThemeTiles(selected: ThemeMode, modifier: Modifier, onPick: (ThemeMo
         ThemeMode.entries.forEach { mode ->
             val on = mode == selected
             Column(
-                Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
+                Modifier.weight(1f).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge))
                     .clickable(role = Role.RadioButton) { onPick(mode) },
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val shape = RoundedCornerShape(14.dp)
+                val shape = RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)
                 Box(
                     Modifier.fillMaxWidth().height(72.dp).clip(shape)
                         .border(if (on) 2.5.dp else 0.dp, if (on) c.accentFill else Color.Transparent, shape),

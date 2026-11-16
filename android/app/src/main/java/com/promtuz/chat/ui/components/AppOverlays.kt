@@ -1,6 +1,19 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.background
+import android.view.ViewGroup
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseOutQuint
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.window.DialogProperties
+import com.promtuz.chat.ui.theme.Promtuz
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -16,17 +29,11 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import com.promtuz.chat.R
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-@Composable
-fun Modifier.modalSurface(shape: Shape): Modifier =
-    clip(shape).background(MaterialTheme.colorScheme.surfaceContainer)
-
-/** Window motion also runs when a caller removes its dialog immediately after an action. */
+/** Fades only: a window scale would drag the blurred backdrop along with it. Scale runs in Compose instead. */
 @Composable
 internal fun ModalWindowMotion() {
     val view = LocalView.current
@@ -35,17 +42,65 @@ internal fun ModalWindowMotion() {
     }
 }
 
+/**
+ * A full-screen window with its own scrim, so the frosted panel can blur the app behind it and the
+ * scrim tap and system bars behave the same on every modal.
+ */
 @Composable
 internal fun AppModal(
     onDismissRequest: () -> Unit,
+    maxWidth: Dp = 400.dp,
     content: @Composable () -> Unit,
 ) {
-    Dialog(onDismissRequest) {
-        ModalWindowMotion()
-        Box(Modifier.sizeIn(minWidth = 280.dp, maxWidth = 560.dp)
-            .semantics { paneTitle = "Dialog" }, propagateMinConstraints = true) { content() }
+    Dialog(onDismissRequest, DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        val view = LocalView.current
+        val dark = Promtuz.colors.isDark
+        SideEffect {
+            (view.parent as? DialogWindowProvider)?.window?.apply {
+                setWindowAnimations(R.style.AppModalAnimation)
+                setDimAmount(0f)
+                setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                drawEdgeToEdge(view, dark)
+            }
+        }
+        val scale = remember { Animatable(0.94f) }
+        LaunchedEffect(Unit) { scale.animateTo(1f, tween(220, easing = EaseOutQuint)) }
+        val dismiss by rememberUpdatedState(onDismissRequest)
+        Box(
+            Modifier.fillMaxSize()
+                .background(ModalScrim)
+                .pointerInput(Unit) { detectTapGestures { dismiss() } }
+                .systemBarsPadding().imePadding().padding(24.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier.widthIn(max = maxWidth)
+                    .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+                    .pointerInput(Unit) { detectTapGestures { } }
+                    .semantics { paneTitle = "Dialog" },
+                propagateMinConstraints = true,
+            ) { content() }
+        }
     }
 }
+
+val ModalScrim = Color.Black.copy(alpha = 0.2f)
+
+/** A window that paints nothing behind the system bars, with icons that suit the app theme rather than the system's. */
+@Suppress("DEPRECATION")
+fun android.view.Window.drawEdgeToEdge(view: android.view.View, dark: Boolean) {
+    addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+    clearFlags(android.view.WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or android.view.WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
+    statusBarColor = android.graphics.Color.TRANSPARENT
+    navigationBarColor = android.graphics.Color.TRANSPARENT
+    if (android.os.Build.VERSION.SDK_INT >= 29) isNavigationBarContrastEnforced = false
+    androidx.core.view.WindowCompat.setDecorFitsSystemWindows(this, false)
+    androidx.core.view.WindowCompat.getInsetsController(this, view).apply {
+        isAppearanceLightStatusBars = !dark
+        isAppearanceLightNavigationBars = !dark
+    }
+}
+val ModalShape = RoundedCornerShape(Radii.modal)
 
 /** Material button ordering/wrapping; only the footer's outer padding is reduced. */
 @Composable
@@ -75,16 +130,16 @@ fun AppAlertDialog(
     text: (@Composable () -> Unit)? = null,
 ) {
     AppModal(onDismissRequest) {
-        Column(modifier.modalSurface(MaterialTheme.shapes.extraLarge)) {
+        Column(modifier.floatingSurface(ModalShape)) {
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
                 .padding(start = 24.dp, end = 24.dp, top = 24.dp)) {
                 icon?.let {
-                    CompositionLocalProvider(LocalContentColor provides AlertDialogDefaults.iconContentColor) {
+                    CompositionLocalProvider(LocalContentColor provides Promtuz.colors.accent) {
                         Box(Modifier.align(Alignment.CenterHorizontally).padding(bottom = 12.dp)) { it() }
                     }
                 }
                 title?.let {
-                    CompositionLocalProvider(LocalContentColor provides AlertDialogDefaults.titleContentColor) {
+                    CompositionLocalProvider(LocalContentColor provides Promtuz.colors.text) {
                         ProvideTextStyle(MaterialTheme.typography.titleLargeEmphasized.copy(fontWeight = FontWeight.Medium)) {
                             Box(Modifier.align(if (icon == null) Alignment.Start else Alignment.CenterHorizontally)
                                 .padding(bottom = 12.dp)) { it() }
@@ -92,7 +147,7 @@ fun AppAlertDialog(
                     }
                 }
                 text?.let {
-                    CompositionLocalProvider(LocalContentColor provides AlertDialogDefaults.titleContentColor) {
+                    CompositionLocalProvider(LocalContentColor provides Promtuz.colors.text) {
                         ProvideTextStyle(MaterialTheme.typography.bodyMediumEmphasized.copy(lineHeight = 18.5.sp)) { it() }
                     }
                 }

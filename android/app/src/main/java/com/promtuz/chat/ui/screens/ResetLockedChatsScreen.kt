@@ -4,7 +4,6 @@ import com.promtuz.chat.ui.components.TextButton
 import com.promtuz.chat.ui.components.GroupedScreen
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -39,9 +38,14 @@ fun ResetLockedChatsScreen() {
             verticalArrangement = Arrangement.Top) {
             if (options.isEmpty()) item { Text("No locked chats", Modifier.padding(12.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            itemsIndexed(options, key = { _, option -> option.conversationId.toHex() }) { index, option ->
-                GroupedActionRow(option.name, index, options.size,
-                    onClick = { if (!busy) { error = null; selected = option } })
+            if (options.isNotEmpty()) item {
+                SettingsCard {
+                    options.forEach { option ->
+                        key(option.conversationId.toHex()) {
+                            SettingsRow(option.name, onClick = { if (!busy) { error = null; selected = option } })
+                        }
+                    }
+                }
             }
         }
     }

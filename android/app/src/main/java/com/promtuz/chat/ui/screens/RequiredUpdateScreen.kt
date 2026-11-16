@@ -35,7 +35,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import com.promtuz.chat.ui.components.AppButton
-import com.promtuz.chat.ui.components.Radii
+import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.RowSubtitleStyle
 import com.promtuz.chat.ui.components.RowTitleStyle
 import com.promtuz.chat.ui.constants.Tweens

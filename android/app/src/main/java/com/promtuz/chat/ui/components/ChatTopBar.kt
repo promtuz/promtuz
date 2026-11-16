@@ -59,10 +59,8 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import org.koin.compose.koinInject
 import com.promtuz.chat.ui.appearance.LocalChatColors
-import com.promtuz.chat.ui.appearance.chatBarHaze
 import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.chat.ui.media.MediaViewer
 import com.promtuz.chat.ui.media.pictureItem
@@ -227,7 +225,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
         // freezeOnExit bakes the blur while the card scales out; Haze shatters under an ancestor scale.
         modifier = Modifier
             .freezeOnExit()
-            .hazeEffect(haze, chatBarHaze()),
+            .frost(haze, FrostRole.ChatBar),
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
 

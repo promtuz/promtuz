@@ -9,8 +9,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.theme.PromtuzColors
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
 
 /** Chat renderers read colors from here, never the scheme, so a preset recolors only the conversation. */
 @Immutable
@@ -63,8 +61,3 @@ private fun Long?.orRole(role: Color): Color = this?.let { Color(it) } ?: role
 private fun bestOn(argb: Long): Color =
     if (Color(argb).luminance() > 0.4f) Color(0xE6000000) else Color.White
 
-@Composable
-fun chatBarHaze(): HazeStyle {
-    val bar = LocalChatColors.current.bar
-    return remember(bar) { HazeStyle(bar, HazeTint(bar.copy(alpha = 0.5f)), 30.dp, 0f) }
-}

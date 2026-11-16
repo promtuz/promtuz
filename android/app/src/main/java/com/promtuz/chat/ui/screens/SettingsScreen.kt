@@ -40,10 +40,11 @@ import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.ui.components.AppIconButton
 import com.promtuz.chat.ui.components.Avatar
-import com.promtuz.chat.ui.components.DrawableIcon
-import com.promtuz.chat.ui.components.GroupedActionRow
+import com.promtuz.chat.ui.components.CardGap
+import com.promtuz.chat.ui.components.SettingsCard
+import com.promtuz.chat.ui.components.SettingsRow
 import com.promtuz.chat.ui.components.GroupedScreen
-import com.promtuz.chat.ui.components.Radii
+import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.concentric
 import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.ui.theme.Promtuz
@@ -155,17 +156,14 @@ fun SettingsScreen(
 }
 
 private fun LazyListScope.settingCard(group: Int, rows: List<SettingRow>) {
-    item("gap-$group") { Spacer(Modifier.height(12.dp)) }
-    rows.forEachIndexed { i, row ->
-        item(row.title, contentType = "setting") {
-            GroupedActionRow(
-                title = row.title,
-                index = i,
-                groupSize = rows.size,
-                onClick = row.onClick,
-                value = row.value,
-                valueColor = row.valueColor,
-            ) { DrawableIcon(row.icon, size = 24.dp) }
+    item("card-$group", contentType = "setting") {
+        Column {
+            CardGap()
+            SettingsCard {
+                rows.forEach { row ->
+                    SettingsRow(row.title, icon = row.icon, value = row.value, valueColor = row.valueColor, onClick = row.onClick)
+                }
+            }
         }
     }
 }

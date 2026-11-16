@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
+import dev.chrisbanes.haze.hazeSource
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.promtuz.chat.navigation.AppNavigation
 import com.promtuz.chat.navigation.Routes
@@ -130,13 +131,18 @@ class LauncherActivity : ComponentActivity() {
         setContent {
             val appearance by AppearanceStore.appearance.collectAsState()
             PromtuzTheme(appearance = appearance) {
-                androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize()) {
-                AppNavigation(viewModel)
-                MediaViewerHost()
-                com.promtuz.chat.ui.camera.CameraOverlayHost()
-                InviteBottomSheet(viewModel)
-                RequiredUpdateHost()
-                MediaAlertHost()
+                val rootHaze = dev.chrisbanes.haze.rememberHazeState()
+                androidx.compose.runtime.CompositionLocalProvider(com.promtuz.chat.ui.components.LocalRootHaze provides rootHaze) {
+                    androidx.compose.foundation.layout.Box(
+                        androidx.compose.ui.Modifier.fillMaxSize().hazeSource(rootHaze)
+                    ) {
+                        AppNavigation(viewModel)
+                        MediaViewerHost()
+                        com.promtuz.chat.ui.camera.CameraOverlayHost()
+                        InviteBottomSheet(viewModel)
+                        RequiredUpdateHost()
+                        MediaAlertHost()
+                    }
                 }
             }
         }

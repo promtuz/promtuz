@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import android.content.Context
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedContent
@@ -76,7 +77,7 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                                     is UpdateState.Error -> c.danger
                                     else -> if (offer) c.accent else c.muted
                                 }
-                                Box(Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(tint.copy(alpha = 0.16f)),
+                                Box(Modifier.size(48.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(tint.copy(alpha = 0.16f)),
                                     contentAlignment = Alignment.Center) {
                                     when (shown) {
                                         UpdateState.None -> MorphIcon(MorphGlyph.Check, null, Modifier.size(24.dp), tint = tint)

@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -58,23 +60,21 @@ fun InviteBottomSheet(vm: AppVM) {
                 is InviteSheet.Added -> {
                     Title("Added ${s.name}")
                     Subtitle("They'll confirm when they next open the app.")
-                    Button(
+                    AppButton(
+                        "Open chat",
                         onClick = {
                             vm.openChatWith(s.ipk.toHex(), s.name)
                             vm.dismissInvite()
                         },
                         Modifier.fillMaxWidth(),
-                    ) { Text("Open chat") }
+                    )
                 }
 
                 is InviteSheet.Unreachable -> {
                     Title("Couldn't reach ${s.name}")
                     Subtitle("They may need to open the app and connect first.")
-                    Button(
-                        onClick = { vm.showInvite(s.bytes) },
-                        Modifier.fillMaxWidth(),
-                    ) { Text("Try again") }
-                    OutlinedButton(vm::dismissInvite, Modifier.fillMaxWidth()) { Text("Close") }
+                    AppButton("Try again", { vm.showInvite(s.bytes) }, Modifier.fillMaxWidth())
+                    AppButton("Close", vm::dismissInvite, Modifier.fillMaxWidth(), kind = ButtonKind.Tonal)
                 }
 
                 is InviteSheet.Confirm -> when {
@@ -83,13 +83,14 @@ fun InviteBottomSheet(vm: AppVM) {
 
                     s.alreadyContact -> {
                         Title("You're already connected with ${s.name}")
-                        Button(
+                        AppButton(
+                            "Open chat",
                             onClick = {
                                 vm.openChatWith(s.ipk.toHex(), s.name)
                                 vm.dismissInvite()
                             },
                             Modifier.fillMaxWidth(),
-                        ) { Text("Open chat") }
+                        )
                     }
 
                     else -> {
@@ -100,11 +101,8 @@ fun InviteBottomSheet(vm: AppVM) {
                         )
                         Subtitle("wants to connect")
                         ExpiryCountdown(s.expiryMs)
-                        Button(
-                            onClick = { vm.acceptInvite(s.bytes, s.ipk, s.name) },
-                            Modifier.fillMaxWidth(),
-                        ) { Text("Add") }
-                        OutlinedButton(vm::dismissInvite, Modifier.fillMaxWidth()) { Text("Not now") }
+                        AppButton("Add", { vm.acceptInvite(s.bytes, s.ipk, s.name) }, Modifier.fillMaxWidth())
+                        AppButton("Not now", vm::dismissInvite, Modifier.fillMaxWidth(), kind = ButtonKind.Tonal)
                     }
                 }
             }
@@ -123,7 +121,7 @@ private fun Title(text: String) = Text(
 private fun Subtitle(text: String) = Text(
     text,
     style = MaterialTheme.typography.bodyMedium,
-    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    color = Promtuz.colors.muted,
     textAlign = TextAlign.Center,
 )
 

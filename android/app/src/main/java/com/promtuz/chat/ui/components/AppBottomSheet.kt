@@ -1,6 +1,7 @@
 package com.promtuz.chat.ui.components
 
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.shape.CircleShape
+import com.promtuz.chat.ui.theme.Promtuz
 
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
@@ -22,7 +23,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
-import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -57,6 +57,8 @@ fun AppBottomSheet(
         sheetState = sheetState,
         shape = RectangleShape,
         containerColor = Color.Transparent,
+        contentColor = com.promtuz.chat.ui.theme.Promtuz.colors.text,
+        scrimColor = ModalScrim,
         dragHandle = null,
         contentWindowInsets = { WindowInsets(0) },
         properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
@@ -74,15 +76,14 @@ fun AppBottomSheet(
                 drop.animateTo(0f, tween(BackSettleMs))
             }
         }
-        Surface(
+        Box(
             Modifier
                 .fillMaxWidth()
                 .graphicsLayer {
                     translationY =
                         drop.value * min(size.height * BackDropFraction, BackDropMax.toPx())
-                },
-            shape = BottomSheetDefaults.ExpandedShape,
-            color = MaterialTheme.colorScheme.surfaceContainer,
+                }
+                .sheetSurface(),
         ) {
             Column(Modifier.windowInsetsPadding(contentWindowInsets())) {
                 Box(
@@ -93,12 +94,10 @@ fun AppBottomSheet(
                 ) {
                     Box(
                         Modifier
-                            .width(48.dp)
-                            .height(3.dp)
-                            .clip(
-                                MaterialTheme.shapes.extraLarge
-                            )
-                            .background(MaterialTheme.colorScheme.onSurfaceVariant)
+                            .width(36.dp)
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(Promtuz.colors.muted.copy(alpha = 0.5f))
                     )
                 }
                 content()

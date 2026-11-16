@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -121,7 +122,7 @@ fun Modifier.pressDim(source: InteractionSource, enabled: Boolean = true): Modif
     return graphicsLayer { this.alpha = alpha }
 }
 
-private val TextButtonShape = RoundedCornerShape(12.dp)
+private val TextButtonShape = RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)
 
 // Material's buttons under the app's names, so every call site gets the app's press feel.
 // Ripples are switched off in PromtuzTheme; these lay PressHighlight or pressDim on instead.
@@ -139,40 +140,6 @@ fun TextButton(
     androidx.compose.material3.TextButton(
         onClick, modifier.clip(TextButtonShape).indication(source, PressHighlight), enabled, TextButtonShape,
         colors, contentPadding = contentPadding, interactionSource = source, content = content,
-    )
-}
-
-@Composable
-fun Button(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    shape: Shape = RoundedCornerShape(Radii.button),
-    colors: ButtonColors = ButtonDefaults.buttonColors(),
-    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
-    content: @Composable RowScope.() -> Unit,
-) {
-    val source = remember { MutableInteractionSource() }
-    androidx.compose.material3.Button(
-        onClick, modifier.pressDim(source, enabled), enabled, shape, colors,
-        contentPadding = contentPadding, interactionSource = source, content = content,
-    )
-}
-
-@Composable
-fun OutlinedButton(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    shape: Shape = RoundedCornerShape(Radii.button),
-    colors: ButtonColors = ButtonDefaults.outlinedButtonColors(),
-    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
-    content: @Composable RowScope.() -> Unit,
-) {
-    val source = remember { MutableInteractionSource() }
-    androidx.compose.material3.OutlinedButton(
-        onClick, modifier.clip(shape).indication(source, PressHighlight), enabled, shape, colors,
-        contentPadding = contentPadding, interactionSource = source, content = content,
     )
 }
 

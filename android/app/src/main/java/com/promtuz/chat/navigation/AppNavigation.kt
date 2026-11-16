@@ -44,12 +44,6 @@ fun AppNavigation(
             entry<Routes.RestorePhrase> {
                 RestorePhraseScreen(onRestored = { appViewModel.completeOnboarding() })
             }
-            entry<Routes.IdentityKeys> {
-                IdentityKeysScreen(
-                    onShareIdentity = { appViewModel.navigator.push(Routes.ShareIdentity) },
-                    onRecoveryPhrase = { appViewModel.navigator.push(Routes.RecoveryPhrase) },
-                )
-            }
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
                 val session = com.promtuz.chat.security.PrivateChatSession
@@ -98,7 +92,7 @@ fun AppNavigation(
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
             entry<Routes.GroupSettings> { key -> GroupSettingsScreen(key.conversation) }
             entry<Routes.ShareIdentity> {
-                ShareIdentityScreen(koinViewModel(), onScanned = { appViewModel.showInvite(it) })
+                ShareIdentityScreen(koinViewModel(), koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner), onScanned = { appViewModel.showInvite(it) })
             }
             entry<Routes.Contacts> { ContactsScreen(
                 onScanned = { appViewModel.showInvite(it) },
@@ -114,12 +108,6 @@ fun AppNavigation(
                 ProfileScreen(
                     viewModel = koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner),
                     onChoosePhoto = { appViewModel.navigator.push(Routes.ProfilePhoto(it.toString())) },
-                )
-            }
-            entry<Routes.EditProfile> {
-                com.promtuz.chat.ui.screens.EditProfileScreen(
-                    viewModel = koinViewModel<ProfileVM>(viewModelStoreOwner = profileOwner),
-                    onSaved = { if (backStack.lastOrNull() == Routes.EditProfile) backStack.removeLastOrNull() },
                 )
             }
             entry<Routes.LockChat> { key ->

@@ -28,6 +28,17 @@ fun PromtuzTheme(
     }
     val palette = remember(appearance.palette, dark) { appearance.palette.colors(dark) }
     val colorScheme = remember(palette) { palette.scheme() }
+    val view = androidx.compose.ui.platform.LocalView.current
+    if (!view.isInEditMode) androidx.compose.runtime.SideEffect {
+        var context = view.context
+        while (context is android.content.ContextWrapper && context !is android.app.Activity) context = context.baseContext
+        (context as? android.app.Activity)?.window?.let {
+            androidx.core.view.WindowCompat.getInsetsController(it, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
+    }
 
     CompositionLocalProvider(
         LocalChatAppearance provides appearance,

@@ -22,7 +22,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
@@ -42,13 +41,17 @@ import com.promtuz.chat.R
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.StickerRef
 import com.promtuz.chat.domain.model.UiStickerPack
-import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.theme.Promtuz
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import com.promtuz.chat.ui.stage.ChatMotion
 import com.promtuz.chat.utils.media.StickerImage
 import kotlinx.coroutines.launch
 
 internal val StickerGap = 8.dp
-private val TabSize = 36.dp
+private val TabSize = 40.dp
+private val SectionLabel = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium)
 
 private class Section(val key: String, val title: String, val stickers: List<StickerRef>, val start: Int)
 
@@ -59,6 +62,7 @@ fun StickerPanelBody(
     onPick: (StickerRef) -> Unit,
     onCreate: () -> Unit,
     onManage: () -> Unit,
+    bottomPadding: androidx.compose.ui.unit.Dp = 8.dp,
 ) {
     if (packs.isEmpty()) {
         Column(
@@ -66,12 +70,8 @@ fun StickerPanelBody(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            Text(
-                "No stickers yet",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            PlaceholderAction("Create a pack", onCreate)
+            Text("No stickers yet", style = RowTitleStyle, color = Promtuz.colors.muted)
+            AppButton("Create a pack", onCreate, Modifier.padding(top = 16.dp), kind = ButtonKind.Tonal)
         }
         return
     }
@@ -98,12 +98,11 @@ fun StickerPanelBody(
             sections.lastOrNull { it.start <= first }?.key ?: sections.first().key
         }
     }
-    val colors = MaterialTheme.colorScheme
-    val accent = LocalChatColors.current.accent
+    val c = Promtuz.colors
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 6.dp),
+            Modifier.fillMaxWidth().height(56.dp).padding(start = 8.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             LazyRow(
@@ -114,26 +113,22 @@ fun StickerPanelBody(
                 items(sections, key = { it.key }) { section ->
                     val selected = section.key == current
                     val background by animateColorAsState(
-                        if (selected) accent.copy(alpha = 0.22f) else Color.Transparent,
+                        if (selected) c.cardHigh else Color.Transparent,
                         ChatMotion.spec(),
                         label = "pack selection",
                     )
                     Box(
                         Modifier
-                            .size(TabSize + 8.dp)
-                            .clip(RoundedCornerShape(10.dp))
+                            .size(TabSize)
+                            .clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small))
                             .background(background)
                             .clickable { scope.launch { grid.animateScrollToItem(section.start) } }
                             .semantics { contentDescription = section.title },
                         contentAlignment = Alignment.Center,
                     ) {
-                        if (section.key == "recent") Text(
-                            "Recent",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (selected) accent else colors.onSurfaceVariant,
-                            maxLines = 1,
-                        ) else section.stickers.firstOrNull()?.let { cover ->
-                            StickerImage(cover, null, Modifier.size(TabSize))
+                        if (section.key == "recent") DrawableIcon(R.drawable.oi_clock, tint = if (selected) c.text else c.muted, size = 20.dp)
+                        else section.stickers.firstOrNull()?.let { cover ->
+                            StickerImage(cover, null, Modifier.size(34.dp).clip(RoundedCornerShape(8.dp)))
                         }
                     }
                 }
@@ -143,7 +138,7 @@ fun StickerPanelBody(
                     .semantics { contentDescription = "Manage stickers" },
                 contentAlignment = Alignment.Center,
             ) {
-                DrawableIcon(R.drawable.oi_settings, tint = colors.onSurfaceVariant)
+                DrawableIcon(R.drawable.oi_settings, tint = c.muted)
             }
         }
 
@@ -151,7 +146,7 @@ fun StickerPanelBody(
             columns = GridCells.Fixed(columns),
             state = grid,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = StickerGap, end = StickerGap, bottom = 8.dp),
+            contentPadding = PaddingValues(start = StickerGap, end = StickerGap, bottom = bottomPadding),
             horizontalArrangement = Arrangement.spacedBy(StickerGap),
             verticalArrangement = Arrangement.spacedBy(StickerGap),
         ) {
@@ -159,9 +154,9 @@ fun StickerPanelBody(
                 item(key = "h:${section.key}", span = { GridItemSpan(maxLineSpan) }) {
                     Text(
                         section.title,
-                        Modifier.padding(start = 2.dp, top = 6.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.onSurfaceVariant,
+                        Modifier.padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 2.dp),
+                        style = SectionLabel,
+                        color = c.muted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -183,7 +178,7 @@ fun StickerCell(ref: StickerRef, onClick: (() -> Unit)? = null) {
     ) {
         StickerImage(
             ref, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit,
-            placeholderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f),
+            placeholderColor = Promtuz.colors.text.copy(alpha = 0.05f),
         )
     }
 }

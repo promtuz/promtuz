@@ -639,7 +639,7 @@ private fun Chrome(
     if (item == null || alpha == 0f) return
     var showInfo by remember(item.key) { mutableStateOf(false) }
     var confirmSave by remember(item.key) { mutableStateOf(false) }
-    if (confirmSave) androidx.compose.material3.AlertDialog(
+    if (confirmSave) com.promtuz.chat.ui.components.AppAlertDialog(
         onDismissRequest = { confirmSave = false },
         title = { Text("Save to gallery?") },
         text = { Text("The saved copy will be available outside this locked chat.") },

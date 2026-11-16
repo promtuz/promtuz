@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.MaterialTheme
@@ -23,7 +25,7 @@ fun RemoveLockDialog(app: AppVM, conversationHex: String, name: String, onDismis
         title = { Text("Remove lock?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("This chat will open without a code, and its notifications come back on.")
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            error?.let { Text(it, color = Promtuz.colors.danger) }
         } },
         confirmButton = { TextButton(enabled = !busy, onClick = {
             busy = true

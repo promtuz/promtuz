@@ -19,9 +19,6 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 
@@ -33,15 +30,9 @@ private val LocalScreenGlass = staticCompositionLocalOf<ScreenGlass?> { null }
 /** Both endpoints are opaque: transparent black must never enter the color tween. */
 @Composable
 fun appTopBarColors(): TopAppBarColors = TopAppBarDefaults.topAppBarColors(
-    containerColor = MaterialTheme.colorScheme.background,
-    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+    containerColor = Promtuz.colors.page,
+    scrolledContainerColor = (if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage),
 )
-
-@Composable
-fun glassStyle(page: Color = Promtuz.colors.page): HazeStyle {
-    val card = Promtuz.colors.card
-    return remember(page, card) { HazeStyle(page, HazeTint(card.copy(alpha = 0.72f)), 32.dp, 0f) }
-}
 
 @Composable
 fun AppTopBar(
@@ -54,11 +45,10 @@ fun AppTopBar(
     colors: TopAppBarColors = appTopBarColors(),
     connectionStatus: Boolean = true,
 ) {
-    // At rest the bar is the page; glass fades in once content slides under it.
     val glass = LocalScreenGlass.current
     val glassModifier = if (glass == null) Modifier else Modifier
         .freezeOnExit()
-        .hazeEffect(glass.haze, glassStyle(glass.page)) { alpha = scrollBehavior?.state?.overlappedFraction ?: 0f }
+        .frost(glass.haze, FrostRole.Bar) { scrollBehavior?.state?.overlappedFraction ?: 0f }
     TopAppBar(
         title = {
             Box(Modifier.centerBarTitle(screenTitleStyle())) {
@@ -85,7 +75,7 @@ fun ScreenScaffold(
     topBar: @Composable (TopAppBarScrollBehavior) -> Unit,
     modifier: Modifier = Modifier,
     scrollableState: ScrollableState? = null,
-    containerColor: Color = MaterialTheme.colorScheme.background,
+    containerColor: Color = Promtuz.colors.page,
     snackbarHost: @Composable () -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
     floatingActionButtonPosition: FabPosition = FabPosition.End,

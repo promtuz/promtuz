@@ -50,7 +50,7 @@ fun StickersScreen(
                         pack.name,
                         subtitle = if (pack.stickers.size == 1) "1 sticker" else "${pack.stickers.size} stickers",
                         leading = {
-                            Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(c.cardHigh), contentAlignment = Alignment.Center) {
+                            Box(Modifier.size(44.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)).background(c.cardHigh), contentAlignment = Alignment.Center) {
                                 pack.cover?.let { StickerImage(it, null, Modifier.size(32.dp), contentScale = ContentScale.Fit) }
                             }
                         },

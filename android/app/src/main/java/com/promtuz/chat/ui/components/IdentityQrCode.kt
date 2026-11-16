@@ -38,10 +38,9 @@ fun IdentityQrCode(
 
     Box(
         modifier
-            .padding(48.dp)
-            .clip(RoundedCornerShape(12))
+            .clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.modal))
             .background(containerColor)
-            .padding(32.dp)
+            .padding(24.dp)
             .aspectRatio(1f)
     ) {
         AnimatedVisibility(loading, Modifier.align(Alignment.Center)) {

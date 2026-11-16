@@ -1,6 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.foundation.background
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -58,25 +61,24 @@ data class AppTextFieldColors(
 private val LocalAppTextFieldColors = compositionLocalOf<AppTextFieldColors?> { null }
 
 object AppTextFieldDefaults {
-    val Shape: Shape = RoundedCornerShape(20.dp)
+    val Shape: Shape = RoundedCornerShape(Radii.field)
     val InputPadding = PaddingValues(vertical = 14.dp)
 
     @Composable
-    fun textStyle(): TextStyle = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Normal)
+    fun textStyle(): TextStyle = RowTitleStyle
 
     @Composable
     fun colors(): AppTextFieldColors {
         LocalAppTextFieldColors.current?.let { return it }
-        val colors = MaterialTheme.colorScheme
         return AppTextFieldColors(
-            container = colors.surfaceContainerLow,
-            text = colors.onSurface,
-            placeholder = colors.onSurfaceVariant.copy(0.7f),
-            label = colors.primary,
-            supporting = colors.onSurfaceVariant.copy(.85f),
-            cursor = colors.primary,
-            divider = colors.outlineVariant,
-            error = colors.error,
+            container = (if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage),
+            text = Promtuz.colors.text,
+            placeholder = Promtuz.colors.muted.copy(0.7f),
+            label = Promtuz.colors.accentFill,
+            supporting = Promtuz.colors.muted.copy(.85f),
+            cursor = Promtuz.colors.accentFill,
+            divider = Promtuz.colors.divider,
+            error = Promtuz.colors.danger,
         )
     }
 }
@@ -170,8 +172,7 @@ fun AppTextFieldGroup(
             if (label != null) Text(
                 label,
                 modifier = Modifier.padding(top = 12.dp),
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Medium,
+                style = SectionHeaderStyle,
                 color = if (isError) colors.error else colors.label,
             )
             CompositionLocalProvider(LocalAppTextFieldColors provides colors) { content() }
@@ -179,7 +180,7 @@ fun AppTextFieldGroup(
         if (supportingText != null) {
             val color = if (isError) colors.error else colors.supporting
             CompositionLocalProvider(LocalContentColor provides color) {
-                ProvideTextStyle(MaterialTheme.typography.bodySmall.copy(color = color)) {
+                ProvideTextStyle(FootnoteStyle.copy(color = color)) {
                     Row(
                         Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
                         verticalAlignment = Alignment.Top,
@@ -281,7 +282,7 @@ fun AppTextFieldInput(
 @Composable
 fun AppTextFieldCounter(count: Int, limit: Int, modifier: Modifier = Modifier) {
     val style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum")
-    val color = if (count > limit) MaterialTheme.colorScheme.error else LocalContentColor.current
+    val color = if (count > limit) Promtuz.colors.danger else LocalContentColor.current
     val measurer = rememberTextMeasurer()
     val remaining = limit - count
     val digits = maxOf(remaining.toString().length, limit.toString().length)

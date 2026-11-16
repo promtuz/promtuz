@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
@@ -172,12 +173,6 @@ internal fun StorageManager(
 
 private data class Slice(val label: String, val bytes: Long, val color: Color)
 
-private fun kindColor(kind: Int) = when (kind) {
-    1 -> Color(0xFF2E9BF0)
-    2 -> Color(0xFFD9A441)
-    else -> Color(0xFF58B98A)
-}
-
 @Composable
 private fun Overview(
     model: StorageVM,
@@ -189,16 +184,16 @@ private fun Overview(
     val c = Promtuz.colors
     val usage = model.usage
     val media = model.media
-    val slices = remember(usage, media) {
+    val slices = remember(usage, media, c) {
         if (usage == null) emptyList() else {
             val byKind = (1..3).associateWith { kind -> media.filter { it.kind == kind }.sumOf { it.bytes } }
             val messages = usage.entries.firstOrNull { it.category == StorageCategory.Chats }?.bytes ?: 0
             val known = byKind.values.sum() + usage.stickers + messages
             listOf(
-                Slice("Photos", byKind.getValue(1), kindColor(1)),
-                Slice("Files", byKind.getValue(2), kindColor(2)),
-                Slice("Voice", byKind.getValue(3), kindColor(3)),
-                Slice("Stickers", usage.stickers, Color(0xFFE0735F)),
+                Slice("Photos", byKind.getValue(1), c.accentFill),
+                Slice("Files", byKind.getValue(2), c.warn),
+                Slice("Voice", byKind.getValue(3), c.success),
+                Slice("Stickers", usage.stickers, c.danger),
                 Slice("Messages", messages, Color(0xFFB287D9)),
                 Slice("Other", (usage.total - known).coerceAtLeast(0), c.muted),
             ).filter { it.bytes > 0 }

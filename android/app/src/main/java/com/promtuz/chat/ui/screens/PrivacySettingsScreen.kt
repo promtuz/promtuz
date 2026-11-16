@@ -36,7 +36,7 @@ fun PrivacySettingsScreen(nav: AppNavigator) {
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 6.dp, bottom = 24.dp)),
         ) {
-            SettingsCard {
+            SettingsCard(header = "Messages") {
                 everyone?.let { current ->
                     SettingsChoiceRow(
                         "Who can message me",

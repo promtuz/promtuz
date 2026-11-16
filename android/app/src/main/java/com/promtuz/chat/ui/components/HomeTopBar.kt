@@ -14,7 +14,6 @@ import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
 import com.promtuz.chat.ui.theme.transparentTopAppBar
 
 
@@ -25,11 +24,10 @@ fun HomeTopBar(
     haze: HazeState? = null,
     glass: () -> Float = { 0f },
 ) {
-    // At rest the bar is the page; glass fades in once chats slide under it.
     TopAppBar(
         modifier = if (haze == null) Modifier else Modifier
             .freezeOnExit()
-            .hazeEffect(haze, glassStyle()) { alpha = glass() },
+            .frost(haze, FrostRole.Bar, scrolled = glass),
         colors = transparentTopAppBar(),
         expandedHeight = 60.dp,
         navigationIcon = {

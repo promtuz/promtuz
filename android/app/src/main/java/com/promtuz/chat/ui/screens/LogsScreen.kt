@@ -1,8 +1,8 @@
 package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.components.TextButton
-import com.promtuz.chat.ui.components.Button
-import com.promtuz.chat.ui.components.OutlinedButton
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -29,7 +29,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
-import com.promtuz.chat.ui.components.Radii
+import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.RowSubtitleStyle
 import com.promtuz.chat.ui.components.SegmentedTabs
 import com.promtuz.chat.ui.theme.Promtuz
@@ -144,7 +144,8 @@ private fun LogExportSheet(logs: List<AppLog>, onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("Export logs", style = MaterialTheme.typography.titleMedium)
-            Button(
+            AppButton(
+                "Copy to clipboard",
                 onClick = {
                     val text = formatLogs(logs)
                     scope.launch {
@@ -154,14 +155,16 @@ private fun LogExportSheet(logs: List<AppLog>, onDismiss: () -> Unit) {
                     }
                 },
                 Modifier.fillMaxWidth(),
-            ) { Text("Copy to clipboard") }
-            OutlinedButton(
+            )
+            AppButton(
+                "Export as file",
                 onClick = {
                     shareLogFile(context, formatLogs(logs))
                     onDismiss()
                 },
                 Modifier.fillMaxWidth(),
-            ) { Text("Export as file") }
+                kind = ButtonKind.Tonal,
+            )
         }
     }
 }

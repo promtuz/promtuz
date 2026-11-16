@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -103,7 +104,7 @@ private fun RelayRow(relay: UiRelay, showPort: Boolean, onConnect: () -> Unit, o
             ) {
                 Box(Modifier.size(tile)) {
                     Box(
-                        Modifier.matchParentSize().clip(RoundedCornerShape(12.dp)).background(c.cardHigh),
+                        Modifier.matchParentSize().clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)).background(c.cardHigh),
                         contentAlignment = Alignment.Center,
                     ) { DrawableIcon(R.drawable.i_network_nodes, size = 22.dp, tint = c.muted) }
                     // The status mark sits on the tile's corner, ringed in the card colour.

@@ -150,13 +150,11 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
                             exit = fadeOut(ChatMotion.spec()) + shrinkVertically(ChatMotion.spec())) {
                             Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
                                 verticalArrangement = Arrangement.Top) {
-                                GroupedActionRow("Create group", 0, 2,
-                                    onClick = { selecting = true }, enabled = !busy && !selecting && people.isNotEmpty()) {
-                                    Icon(painterResource(R.drawable.i_users), null, Modifier.size(26.dp))
-                                }
-                                GroupedActionRow("Add Contact", 1, 2,
-                                    onClick = { scanning = true }, enabled = !busy && !selecting) {
-                                    Icon(painterResource(R.drawable.i_user_add), null, Modifier.size(26.dp))
+                                SettingsCard {
+                                    SettingsRow("Create group", icon = R.drawable.i_users,
+                                        enabled = !busy && !selecting && people.isNotEmpty(), onClick = { selecting = true })
+                                    SettingsRow("Add contact", icon = R.drawable.i_user_add,
+                                        enabled = !busy && !selecting, onClick = { scanning = true })
                                 }
                             }
                         }
@@ -166,7 +164,7 @@ internal fun ContactsContent(state: ContactsState, actions: ContactsActions,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = padding.calculateBottomPadding()).padding(16.dp),
                 enter = fadeIn(ChatMotion.spec()) + slideInVertically(ChatMotion.spec()) { it },
                 exit = fadeOut(ChatMotion.spec()) + slideOutVertically(ChatMotion.spec()) { it }) {
-                GroupActionButton("Create group", { naming = true; actions.clearGroupError() }, !busy)
+                AppButton("Create group", { naming = true; actions.clearGroupError() }, enabled = !busy)
             }
         }
     }

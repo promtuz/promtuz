@@ -1,5 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
 import com.promtuz.chat.ui.text.EmojiText
 import com.promtuz.chat.ui.text.clock
 
@@ -52,6 +56,7 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.runtime.remember
 import kotlin.math.roundToInt
 import com.promtuz.chat.R
+import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.media.mediaOrigin
@@ -324,50 +329,48 @@ private fun BoxScope.MediaTileContent(
     )
 }
 
-/** With a [surface] the player is its own pill on the wallpaper; without one it sits inside a bubble. */
+/** The foot row leaves its end free: the bubble lays the time and status there. */
 @Composable
-fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, surface: Color? = null) {
+fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, bubbleColor: Color = Promtuz.colors.card) {
     val context = LocalContext.current
     val playback by VoicePlayer.state.collectAsState()
     val mine = playback?.takeIf { it.dispatchIdHex == voice.dispatchIdHex }
     val playing = mine?.playing == true
     val position = mine?.positionMs ?: 0
     val fraction = if (voice.durationMs > 0) (position.toFloat() / voice.durationMs).coerceIn(0f, 1f) else 0f
-    val shown = if (mine != null) (voice.durationMs - position).coerceAtLeast(0) else voice.durationMs
-    Row(
-        Modifier
-            .width(VoiceWidth)
-            .clip(RoundedCornerShape(26.dp))
-            .background(surface ?: textColor.copy(alpha = 0.06f))
-            .padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
+    val total = clock(voice.durationMs + 500L)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Box(
             Modifier
                 .size(40.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(textColor.copy(alpha = if (surface != null) 0.18f else 0.10f))
-                .clickable { VoicePlayer.toggle(context, voice.dispatchIdHex, voice.bytes, voice.mime) },
+                .clip(RoundedCornerShape(16.dp))
+                .background(textColor)
+                .clickable(onClickLabel = if (playing) "Pause" else "Play") {
+                    VoicePlayer.toggle(context, voice.dispatchIdHex, voice.bytes, voice.mime)
+                },
             Alignment.Center,
         ) {
             MorphIcon(
                 if (playing) MorphGlyph.Pause else MorphGlyph.Play,
                 if (playing) "Pause voice message" else "Play voice message",
-                Modifier.size(18.dp),
-                tint = textColor,
+                Modifier.size(20.dp),
+                tint = bubbleColor,
             )
         }
-        Waveform(voice.waveform, fraction, textColor, Modifier.weight(1f).height(28.dp))
-        Text(
-            clock(shown + 500L),
-            style = MaterialTheme.typography.labelMedium,
-            color = textColor.copy(alpha = 0.8f),
-        )
+        Column(Modifier.width(VoiceWaveWidth), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Waveform(voice.waveform, fraction, textColor, Modifier.fillMaxWidth().height(22.dp))
+            Text(
+                if (mine != null) "${clock(position.toLong())} / $total" else total,
+                style = VoiceTimeStyle,
+                color = textColor.copy(alpha = 0.6f),
+                maxLines = 1,
+            )
+        }
     }
 }
 
-private val VoiceWidth = 232.dp
+private val VoiceWaveWidth = 150.dp
+private val VoiceTimeStyle = TextStyle(fontSize = 12.sp, lineHeight = 14.sp)
 
 /** Reserve the sticker's dimensions while downloading to keep chat layout stable. */
 @Composable
@@ -393,24 +396,27 @@ fun StickerBlock(sticker: MessageContent.Sticker, textColor: Color) {
 
 private val StickerBox = 160.dp
 
-/** Bars from 0..255 loudness samples; a missing waveform draws as a flat line. */
+/** 3dp bars 2dp apart, resampled to fit; each bar takes the loudest sample in its slice. */
 @Composable
 private fun Waveform(samples: ByteArray, lit: Float, color: Color, modifier: Modifier) {
     Canvas(modifier) {
-        val n = if (samples.isEmpty()) 32 else samples.size
-        val step = size.width / n
-        val stroke = (step * 0.55f).coerceIn(2f, 6f)
+        val bar = 3.dp.toPx()
+        val gap = 2.dp.toPx()
+        val n = ((size.width + gap) / (bar + gap)).toInt().coerceAtLeast(1)
+        val radius = CornerRadius(bar / 2)
         for (i in 0 until n) {
-            val v = if (samples.isEmpty()) 0.15f else (samples[i].toInt() and 0xff) / 255f
-            val h = (size.height * (0.15f + 0.85f * v)).coerceAtLeast(stroke)
-            val x = step * i + step / 2
+            val v = if (samples.isEmpty()) 0f else {
+                val from = i * samples.size / n
+                val to = maxOf(from + 1, (i + 1) * samples.size / n)
+                (from until to).maxOf { samples[it].toInt() and 0xff } / 255f
+            }
+            val h = maxOf(bar, size.height * v)
             val played = (i + 0.5f) / n <= lit
-            drawLine(
-                color = color.copy(alpha = if (played) 0.95f else 0.35f),
-                start = Offset(x, (size.height - h) / 2),
-                end = Offset(x, (size.height + h) / 2),
-                strokeWidth = stroke,
-                cap = StrokeCap.Round,
+            drawRoundRect(
+                color.copy(alpha = if (played) 1f else 0.4f),
+                Offset(i * (bar + gap), (size.height - h) / 2),
+                Size(bar, h),
+                radius,
             )
         }
     }

@@ -2,5 +2,6 @@
 <resources>
     <string name="profile_photo_choose">Choose photo</string>
     <string name="profile_photo_remove">Remove photo</string>
+    <string name="profile_photo_change">Change photo</string>
     <string name="profile_photo_edit">Change profile picture</string>
 </resources>

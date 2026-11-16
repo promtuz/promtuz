@@ -36,6 +36,7 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.security.PrivateChatSession
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.media.rememberAvatar
@@ -128,20 +129,7 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
             Row(Modifier.fillMaxWidth().padding(4.dp)) { GoBackButton() }
             Spacer(Modifier.weight(1f))
 
-            Box(Modifier.size(80.dp)) {
-                if (chat?.isGroup == true) GroupAvatar(name, emptyList(), 80.dp, conversation = conversation)
-                else Avatar(name, 80.dp, identityKey = chat?.peerHex ?: conversation, image = rememberAvatar(chat?.peerHex))
-                Box(
-                    Modifier.align(Alignment.BottomEnd).offset(4.dp, 4.dp).size(30.dp).clip(CircleShape)
-                        .background(chatColors.wallpaper).padding(3.dp).clip(CircleShape).background(chatColors.incomingBubble),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Crossfade(opened, animationSpec = tween(180), label = "lock") { open ->
-                        DrawableIcon(if (open) R.drawable.oi_lock_chat_open else R.drawable.oi_lock_chat,
-                            size = 16.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
+            LockedAvatar(name, chat, conversation, 80.dp, opened, ring = chatColors.wallpaper, badge = chatColors.incomingBubble)
             Spacer(Modifier.height(16.dp))
             Row(Modifier.padding(horizontal = 32.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -166,7 +154,7 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
                     androidx.compose.animation.AnimatedVisibility(!throttled,
                         enter = fadeIn(tween(320, easing = EaseOutQuint)) + scaleIn(tween(320, easing = EaseOutQuint), 0.8f),
                         exit = fadeOut(tween(320, easing = EaseOutQuint)) + scaleOut(tween(320, easing = EaseOutQuint), 0.8f)) {
-                        CodeKeypad(::type, ::erase, { if (idle) code = "" }, keyColor = chatColors.incomingBubble)
+                        CodeKeypad(::type, ::erase, { if (idle) code = "" })
                     }
                     androidx.compose.animation.AnimatedVisibility(throttled, enter = fadeIn(tween(320)), exit = fadeOut(tween(320))) {
                         Text("Too many tries.\nTry again in $waitSeconds ${if (waitSeconds == 1) "second" else "seconds"}",
@@ -257,4 +245,24 @@ private object Throttle {
         return at
     }
     fun reset(c: Context) = prefs(c).edit().clear().apply()
+}
+
+/** The chat's avatar with a lock badge; the gate and lock setup share it. */
+@Composable
+internal fun LockedAvatar(name: String, chat: com.promtuz.chat.domain.model.ChatSummary?, conversation: String, size: androidx.compose.ui.unit.Dp, opened: Boolean = false,
+    ring: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.background, badge: androidx.compose.ui.graphics.Color = Promtuz.colors.card) {
+    val c = Promtuz.colors
+    Box(Modifier.size(size)) {
+        if (chat?.isGroup == true) GroupAvatar(name, emptyList(), size, conversation = conversation)
+        else Avatar(name, size, identityKey = chat?.peerHex ?: conversation, image = rememberAvatar(chat?.peerHex))
+        Box(
+            Modifier.align(Alignment.BottomEnd).offset(4.dp, 4.dp).size(size * 0.375f).clip(CircleShape)
+                .background(ring).padding(3.dp).clip(CircleShape).background(badge),
+            contentAlignment = Alignment.Center,
+        ) {
+            Crossfade(opened, animationSpec = tween(180), label = "lock") { open ->
+                DrawableIcon(if (open) R.drawable.oi_lock_chat_open else R.drawable.oi_lock_chat, size = size * 0.2f, tint = c.muted)
+            }
+        }
+    }
 }

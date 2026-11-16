@@ -5,7 +5,7 @@ capturable = "3.0.1"
 core = "3.5.4"
 coreSplashscreen = "1.2.0"
 firebaseBom = "34.19.0"
-hazeMaterials = "1.7.3"
+haze = "2.1.0"
 jna = "5.19.1"
 kotlin = "2.4.20"
 coreKtx = "1.19.1"
@@ -67,7 +67,9 @@ play-services-blockstore = { module = "com.google.android.gms:play-services-auth
 androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "workRuntime" }
 timber = { module = "com.jakewharton.timber:timber", version.ref = "timber" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "core" }
-haze-materials = { module = "dev.chrisbanes.haze:haze-materials", version.ref = "hazeMaterials" }
+haze = { module = "dev.chrisbanes.haze:haze", version.ref = "haze" }
+haze-blur = { module = "dev.chrisbanes.haze:haze-blur", version.ref = "haze" }
+haze-glass = { module = "dev.chrisbanes.haze:haze-glass", version.ref = "haze" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTest" }
 androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExtJunit" }

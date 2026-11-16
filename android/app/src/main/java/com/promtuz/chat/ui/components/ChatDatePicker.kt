@@ -6,6 +6,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.graphics.Color
+import com.promtuz.chat.ui.theme.Promtuz
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -31,29 +35,33 @@ internal fun ChatDatePicker(
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    DatePickerDialog(
-        colors = DatePickerDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(enabled = state.selectedDateMillis != null && !busy, onClick = {
-                val date = Instant.ofEpochMilli(state.selectedDateMillis!!).atZone(ZoneOffset.UTC).toLocalDate()
-                busy = true
-                error = null
-                scope.launch {
-                    try {
-                        if (onJump(date)) onDismiss() else error = "No messages in this chat."
-                    } catch (e: CancellationException) { throw e }
-                    catch (_: Exception) { error = "Couldn't open that date. Try again." }
-                    finally { busy = false }
-                }
-            }) { Text(if (busy) "Opening…" else "Jump") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    ) {
-        ModalWindowMotion()
-        Column {
-            DatePicker(state, colors = DatePickerDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainer), title = { Text("Jump to date", Modifier.padding(start = 24.dp, top = 16.dp)) })
-            error?.let { Text(it, Modifier.padding(24.dp), color = MaterialTheme.colorScheme.error) }
+    val jump: () -> Unit = {
+        val date = Instant.ofEpochMilli(state.selectedDateMillis!!).atZone(ZoneOffset.UTC).toLocalDate()
+        busy = true
+        error = null
+        scope.launch {
+            try {
+                if (onJump(date)) onDismiss() else error = "No messages in this chat."
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { error = "Couldn't open that date. Try again." }
+            finally { busy = false }
+        }
+        Unit
+    }
+    val clear = DatePickerDefaults.colors(containerColor = Color.Transparent)
+    AppModal(onDismiss, maxWidth = 360.dp) {
+        Column(Modifier.floatingSurface(ModalShape).verticalScroll(rememberScrollState())) {
+            DatePicker(state, colors = clear,
+                title = { Text("Jump to date", Modifier.padding(start = 24.dp, top = 16.dp)) })
+            error?.let { Text(it, Modifier.padding(horizontal = 24.dp), color = Promtuz.colors.danger) }
+            ModalActions(
+                confirmButton = {
+                    TextButton(enabled = state.selectedDateMillis != null && !busy, onClick = jump) {
+                        Text(if (busy) "Opening…" else "Jump")
+                    }
+                },
+                dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+            )
         }
     }
 }

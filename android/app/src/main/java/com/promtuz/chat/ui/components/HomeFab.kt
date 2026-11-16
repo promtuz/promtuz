@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -33,7 +35,7 @@ import com.promtuz.chat.ui.theme.DepthPalette
 
 @Composable
 fun HomeFab(appViewModel: AppVM) {
-    val primary = MaterialTheme.colorScheme.primary
+    val primary = Promtuz.colors.accentFill
     val palette = remember(primary) { DepthPalette(primary) }
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()

@@ -4,8 +4,14 @@ import com.promtuz.chat.ui.components.TextButton
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Alignment
+import com.promtuz.chat.ui.components.RowTitleStyle
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -29,13 +35,18 @@ fun ReleaseHistoryScreen(viewModel: UpdateVM = koinViewModel()) {
     GroupedScreen({ Text("Release history") }, connectionStatus = false) { padding ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(top = 6.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (loading) item("loading") { LinearProgressIndicator() }
-            error?.let { message -> item("error") {
-                Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                TextButton(onClick = viewModel::loadHistory, enabled = !loading) { Text("Try again") }
-            } }
-            if (notes.isEmpty() && !loading && error == null) item("empty") {
-                Text("No release notes available yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Saved notes show at once; the network only adds newer ones, so it stays quiet unless nothing is shown.
+            if (notes.isEmpty()) item("state") {
+                Box(Modifier.fillParentMaxWidth().padding(top = 48.dp), contentAlignment = Alignment.Center) {
+                    when {
+                        loading -> CircularProgressIndicator(Modifier.size(28.dp), color = Promtuz.colors.muted, strokeWidth = 2.5.dp)
+                        error != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(error!!, style = RowTitleStyle, color = Promtuz.colors.muted)
+                            TextButton(onClick = viewModel::loadHistory) { Text("Try again") }
+                        }
+                        else -> Text("No release notes yet.", style = RowTitleStyle, color = Promtuz.colors.muted)
+                    }
+                }
             }
             releaseHistory(notes, BuildConfig.VERSION_CODE.toLong())
         }

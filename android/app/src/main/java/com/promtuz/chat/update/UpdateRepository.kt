@@ -299,7 +299,7 @@ class UpdateRepository(private val context: Context) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                _historyError.value = "Couldn't load release history. Saved notes are still available."
+                _historyError.value = "Couldn't load release notes."
             } finally {
                 refreshNoteViews()
                 _historyLoading.value = false

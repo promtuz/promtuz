@@ -25,6 +25,8 @@ import com.promtuz.chat.ui.components.HomeContextMenu
 import com.promtuz.chat.ui.components.HomeMenuState
 import com.promtuz.chat.ui.components.RequestDecision
 import com.promtuz.chat.ui.components.SimpleScreen
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.push.PushNotifier
@@ -45,8 +47,9 @@ fun MessageRequestsScreen() {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     Box {
+        val menuHaze = rememberHazeState()
         SimpleScreen({ Text("Message requests") }) { padding ->
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = padding) {
+            LazyColumn(Modifier.fillMaxSize().hazeSource(menuHaze), contentPadding = padding) {
                 if (requests.isEmpty()) item {
                     Text("No message requests", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -81,6 +84,6 @@ fun MessageRequestsScreen() {
                 }
             }
         }
-        HomeContextMenu(menuState)
+        HomeContextMenu(menuState, menuHaze)
     }
 }

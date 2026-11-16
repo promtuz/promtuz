@@ -121,6 +121,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val mergeWindowMs = layout.mergeWindowSecs * 1000L
     val wallpaper = rememberChatWallpaper(appearance.wallpaper)
     val hazeState = rememberHazeState()
+    val menuHaze = rememberHazeState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val calendar = rememberChatCalendar()
@@ -220,6 +221,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     }
 
     Box {
+        Box(Modifier.hazeSource(menuHaze)) {
         Scaffold(
             topBar = { ChatTopBar(name, viewModel, hazeState) },
             bottomBar = {
@@ -375,12 +377,14 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             )
         }
         }
+        }
 
         menu.anchor?.let { anchor ->
             // Follows the pinned row, including viewport clamping as the composer grows.
             MessageContextMenu(
                 state = menu,
                 quickReactions = QuickReactions,
+                haze = menuHaze,
                 anchorOffsetY = { stage.pinnedOffsetY },
                 actionGroups = menuActionsFor(anchor.msg, viewModel,
                     onDelete = { confirmDelete = it.deleteTargets() }, onInfo = { pendingInfo = it }) { menu.close() },

@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,7 +47,6 @@ fun StickerPackSheet(
     onDismiss: () -> Unit,
     onAddImages: (packHex: String) -> Unit,
 ) {
-    val colors = MaterialTheme.colorScheme
     var preview by remember(ref.packHex) { mutableStateOf<UiPackPreview?>(null) }
     var error by remember(ref.packHex) { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -90,7 +91,7 @@ fun StickerPackSheet(
                     Text(
                         if (it.stickers.size == 1) "1 sticker" else "${it.stickers.size} stickers",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = colors.onSurfaceVariant,
+                        color = Promtuz.colors.muted,
                     )
                 }
             }
@@ -104,14 +105,14 @@ fun StickerPackSheet(
             LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
                 modifier = Modifier.fillMaxWidth().heightIn(max = maxGrid),
-                contentPadding = PaddingValues(horizontal = StickerGap, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(StickerGap),
                 verticalArrangement = Arrangement.spacedBy(StickerGap),
             ) {
                 items(p.stickers.size, key = { p.stickers[it].key }) { i -> StickerCell(p.stickers[i]) }
             }
             if (error != null) Text(
-                error!!, Modifier.padding(horizontal = 24.dp), color = colors.error,
+                error!!, Modifier.padding(horizontal = 24.dp), color = Promtuz.colors.danger,
                 style = MaterialTheme.typography.bodyMedium,
             )
             val label = when {
@@ -119,7 +120,7 @@ fun StickerPackSheet(
                 kept -> "Remove stickers"
                 else -> "Add stickers"
             }
-            GroupActionButton(
+            AppButton(
                 label,
                 onClick = {
                     busy = true
@@ -131,12 +132,13 @@ fun StickerPackSheet(
                             .onFailure { error = if (kept) "Couldn’t remove the pack" else "Couldn’t add the pack" }
                     }
                 },
-                enabled = !busy,
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
+                kind = if (kept) ButtonKind.Danger else ButtonKind.Primary,
+                enabled = !busy,
             )
         } else Box(Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
             if (error != null) Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(error!!, color = colors.error)
+                Text(error!!, color = Promtuz.colors.danger)
                 TextButton(onClick = { attempt++ }) { Text("Retry") }
             } else CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
         }

@@ -30,6 +30,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -47,17 +50,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.promtuz.chat.ui.theme.Promtuz
-import com.promtuz.chat.ui.util.groupedRoundShape
-
-/** Corner radii. Nest with [concentric] so an inner shape's corners run parallel to its container's. */
-object Radii {
-    val card = 22.dp
-    val button = 20.dp
-    val buttonJoin = 16.dp
-    val field = 16.dp
-    val iconButton = 14.dp
-    val chip = 10.dp
-}
+import com.promtuz.chat.ui.theme.Radii
 
 /** The radius for a shape sitting [inset] inside one of radius [outer]. */
 fun concentric(outer: Dp, inset: Dp, min: Dp = 4.dp): Dp = (outer - inset).coerceAtLeast(min)
@@ -77,6 +70,20 @@ fun AppButton(
     enabled: Boolean = true,
     busy: Boolean = false,
     shape: Shape = RoundedCornerShape(Radii.button),
+) = AppButton(onClick, modifier, kind, enabled, busy, shape) {
+    icon?.let { DrawableIcon(it, size = 20.dp, tint = LocalContentColor.current) }
+    Text(text)
+}
+
+@Composable
+fun AppButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    kind: ButtonKind = ButtonKind.Primary,
+    enabled: Boolean = true,
+    busy: Boolean = false,
+    shape: Shape = RoundedCornerShape(Radii.button),
+    content: @Composable RowScope.() -> Unit,
 ) {
     val c = Promtuz.colors
     val (bg, fg) = when {
@@ -99,23 +106,7 @@ fun AppButton(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (busy) CircularProgressIndicator(Modifier.size(20.dp), color = fg, strokeWidth = 2.dp)
-        else {
-            icon?.let { DrawableIcon(it, size = 20.dp, tint = fg) }
-            Text(text, style = ButtonText, color = fg)
-        }
-    }
-}
-
-/** Stacked buttons read as one group: outer corners [Radii.button], joins [Radii.buttonJoin]. */
-@Composable
-fun ButtonGroup(
-    modifier: Modifier = Modifier,
-    vararg buttons: @Composable (shape: Shape) -> Unit,
-) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        buttons.forEachIndexed { i, button ->
-            button(groupedRoundShape(i, buttons.size, major = Radii.button.value.toInt(), minor = Radii.buttonJoin.value.toInt()))
-        }
+        else CompositionLocalProvider(LocalContentColor provides fg, LocalTextStyle provides ButtonText) { content() }
     }
 }
 

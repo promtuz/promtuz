@@ -1,7 +1,8 @@
 package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.components.TextButton
-import com.promtuz.chat.ui.components.Button
+import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.ButtonKind
 import com.promtuz.chat.ui.components.AppAlertDialog
 import android.app.Activity
 import androidx.compose.foundation.layout.Arrangement
@@ -16,7 +17,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import com.promtuz.chat.ui.components.AppTextField
 import androidx.compose.material3.Text
@@ -103,7 +103,8 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
             )
 
             Spacer(Modifier.height(24.dp))
-            Button(
+            AppButton(
+                "Restore",
                 {
                     val words = phrase.trim().split(Regex("\\s+"))
                     when {
@@ -136,10 +137,8 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
                     }
                 },
                 Modifier.fillMaxWidth(),
-                enabled = !busy,
-            ) {
-                if (busy) CircularProgressIndicator(Modifier.height(18.dp)) else Text("Restore")
-            }
+                busy = busy,
+            )
         }
 
     }

@@ -1,5 +1,11 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.Dp
+import com.promtuz.chat.R
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -81,8 +87,8 @@ fun CodeBoxes(code: String, filled: Boolean, modifier: Modifier = Modifier) {
                 tween(200, delayMillis = if (filled) i * 75 else 0), label = "fill")
             val active = !filled && i == code.length
             Box(
-                Modifier.size(44.dp, 52.dp).clip(RoundedCornerShape(12.dp)).background(fill)
-                    .border(if (active) 2.dp else 0.dp, if (active) colors.primary else Color.Transparent, RoundedCornerShape(12.dp)),
+                Modifier.size(44.dp, 52.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)).background(fill)
+                    .border(if (active) 2.dp else 0.dp, if (active) colors.primary else Color.Transparent, RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)),
                 contentAlignment = Alignment.Center,
             ) {
                 androidx.compose.animation.AnimatedVisibility(i < code.length, enter = scaleIn(tween(150)) + fadeIn(tween(150)),
@@ -94,37 +100,49 @@ fun CodeBoxes(code: String, filled: Boolean, modifier: Modifier = Modifier) {
     }
 }
 
-private val KEY_LETTERS = listOf("+", "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ")
+private val KEY_LETTERS = listOf("+", " ", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ")
 
-/** Telegram's passcode keypad: 60dp keys, 28dp apart across, 16dp down. */
+/** Rounded keys whose outer grid corners open up a little, so the filled block reads as one shape. */
 @Composable
 fun CodeKeypad(
     onDigit: (Char) -> Unit,
     onBackspace: () -> Unit,
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
-    keyColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
 ) {
     val haptic = LocalHapticFeedback.current
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    val c = Promtuz.colors
+    val compact = LocalConfiguration.current.screenHeightDp < 600
+    val key = if (compact) 58.dp else 72.dp
+    val r = if (compact) 16.dp else 20.dp
+    val outer = if (compact) 21.dp else 26.dp
+    val fill = c.text.copy(alpha = if (c.isDark) 0.08f else 0.06f)
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         listOf("123", "456", "789", " 0<").forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                row.forEach { key ->
-                    when (key) {
-                        ' ' -> Spacer(Modifier.size(60.dp))
-                        '<' -> PadKey(Color.Transparent, "Delete", {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                row.forEach { k ->
+                    val shape = when (k) {
+                        '1' -> RoundedCornerShape(outer, r, r, r)
+                        '3' -> RoundedCornerShape(r, outer, r, r)
+                        '7' -> RoundedCornerShape(r, r, r, outer)
+                        '9' -> RoundedCornerShape(r, r, outer, r)
+                        '0' -> RoundedCornerShape(r, r, outer, outer)
+                        else -> RoundedCornerShape(r)
+                    }
+                    when (k) {
+                        ' ' -> Spacer(Modifier.size(key))
+                        '<' -> PadKey(key, CircleShape, Color.Transparent, "Delete", {
                             haptic.performHapticFeedback(HapticFeedbackType.KeyboardTap); onBackspace()
                         }, { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onClear() }) {
-                            Text("[backspace]", fontSize = 9.sp, maxLines = 1, softWrap = false)
+                            DrawableIcon(R.drawable.i_backspace, tint = c.text, size = if (compact) 22.dp else 27.dp)
                         }
-                        else -> PadKey(keyColor, key.toString(), {
-                            haptic.performHapticFeedback(HapticFeedbackType.KeyboardTap); onDigit(key)
+                        else -> PadKey(key, shape, fill, k.toString(), {
+                            haptic.performHapticFeedback(HapticFeedbackType.KeyboardTap); onDigit(k)
                         }) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(key.toString(), fontSize = 26.sp, fontWeight = FontWeight.Bold, lineHeight = 28.sp)
-                                val letters = KEY_LETTERS[key - '0']
-                                if (letters.isNotEmpty()) Text(letters, fontSize = 10.sp, lineHeight = 10.sp,
-                                    modifier = Modifier.alpha(0.5f))
+                                Text(k.toString(), color = c.text, style = if (compact) DigitCompact else Digit)
+                                Text(KEY_LETTERS[k - '0'], color = c.muted, style = Letters,
+                                    letterSpacing = if (k == '0') 1.2.sp else 0.sp)
                             }
                         }
                     }
@@ -134,14 +152,21 @@ fun CodeKeypad(
     }
 }
 
+private val Digit = TextStyle(fontSize = 30.sp, lineHeight = 33.sp)
+private val DigitCompact = TextStyle(fontSize = 24.sp, lineHeight = 27.sp)
+private val Letters = TextStyle(fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Medium)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PadKey(color: Color, label: String, onClick: () -> Unit, onLongClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
+private fun PadKey(
+    size: Dp, shape: Shape, color: Color, label: String,
+    onClick: () -> Unit, onLongClick: (() -> Unit)? = null, content: @Composable () -> Unit,
+) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.85f else 1f, tween(100), label = "press")
+    val scale by animateFloatAsState(if (pressed) 0.9f else 1f, tween(100), label = "press")
     Box(
-        Modifier.size(60.dp).graphicsLayer { scaleX = scale; scaleY = scale }.clip(CircleShape).background(color)
+        Modifier.size(size).graphicsLayer { scaleX = scale; scaleY = scale }.clip(shape).background(color)
             .combinedClickable(source, PressHighlight, onClickLabel = label, onLongClick = onLongClick, onClick = onClick)
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,

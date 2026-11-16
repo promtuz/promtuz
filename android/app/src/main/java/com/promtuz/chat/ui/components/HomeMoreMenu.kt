@@ -19,7 +19,7 @@ fun HomeMoreMenu(viewModel: AppVM, modifier: Modifier = Modifier, showSearch: Bo
                 motion.origin = null
                 viewModel.navigator.push(Routes.Search)
             }))
-            add(listOf(MenuAction("My Profile", R.drawable.oi_user_circle) { viewModel.navigator.push(Routes.Profile) }))
+            add(listOf(MenuAction("My profile", R.drawable.oi_user_circle) { viewModel.navigator.push(Routes.Profile) }))
             add(listOf(MenuAction("Settings", R.drawable.oi_settings) { viewModel.navigator.push(Routes.Settings) }))
         }
     }

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.TextButton
 import android.app.NotificationManager
 import android.content.Intent

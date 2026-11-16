@@ -1,5 +1,8 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -29,7 +32,7 @@ import com.promtuz.chat.navigation.LocalSearchMotion
 
 /** Search hints inherit exactly the same metrics as the text replacing them. */
 @Composable
-fun searchTextStyle() = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Normal)
+fun searchTextStyle() = RowTitleStyle
 
 /** One visual owner for the list affordance, editable field, and their transition. */
 @Composable
@@ -44,7 +47,6 @@ fun HomeSearchBar(
     // Coordinates are consumed by graphics layers, not composition. Scrolling and animation must
     // not recompose the field or the chat list on every frame.
     val bounds = remember { mutableStateOf(Rect.Zero) }
-    val colors = MaterialTheme.colorScheme
     Box(
         modifier = Modifier
             .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp)
@@ -72,12 +74,12 @@ fun HomeSearchBar(
                 },
             ))
             .clip(RoundedCornerShape(Radii.field))
-            .background(colors.surfaceContainerLow),
+            .background((if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage)),
     ) {
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(44.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
                 DrawableIcon(R.drawable.oi_search, size = 18.dp, strokeWidth = 2.25f,
-                    tint = colors.onSurfaceVariant,
+                    tint = Promtuz.colors.muted,
                     modifier = Modifier.graphicsLayer {
                         alpha = if (expanded) 1f - motion.fraction().coerceIn(0f, 1f) else 1f
                     })
@@ -85,7 +87,7 @@ fun HomeSearchBar(
                     IconButton(onClick = { motion.onBack() }, modifier = Modifier.graphicsLayer {
                         alpha = motion.fraction().coerceIn(0f, 1f)
                     }) {
-                        TopBarMorphIcon(MorphGlyph.Back, "Back", tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp), strokeWidth = 2.25.dp)
+                        TopBarMorphIcon(MorphGlyph.Back, "Back", tint = Promtuz.colors.muted, modifier = Modifier.size(20.dp), strokeWidth = 2.25.dp)
                     }
                 }
             }
@@ -95,8 +97,8 @@ fun HomeSearchBar(
                         value = query,
                         onValueChange = onQueryChange,
                         singleLine = true,
-                        textStyle = searchTextStyle().copy(color = colors.onSurface),
-                        cursorBrush = SolidColor(colors.primary),
+                        textStyle = searchTextStyle().copy(color = Promtuz.colors.text),
+                        cursorBrush = SolidColor(Promtuz.colors.accentFill),
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
                             autoCorrectEnabled = false,
@@ -120,5 +122,5 @@ fun HomeSearchBar(
 
 @Composable
 private fun SearchHint() {
-    Text("Search", style = searchTextStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text("Search", style = searchTextStyle(), color = Promtuz.colors.muted)
 }
