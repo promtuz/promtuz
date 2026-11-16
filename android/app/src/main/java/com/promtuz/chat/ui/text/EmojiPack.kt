@@ -25,6 +25,9 @@ object EmojiPack {
 
     private val glyphs = LruCache<String, ImageBitmap>(512)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // A fling asks for hundreds of glyphs at once; a few decoders keep it from starving everything else.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val decoder = Dispatchers.IO.limitedParallelism(3)
     @Volatile private var loading = false
 
     /** Start loading the index if nobody has; safe to call from every composition. */
@@ -56,8 +59,9 @@ object EmojiPack {
     /** Decode (or recall) the glyph for [key]; null when the asset is missing or unreadable. */
     suspend fun glyph(context: Context, key: String): ImageBitmap? {
         glyphs.get(key)?.let { return it }
+        kotlinx.coroutines.yield()
         val app = context.applicationContext
-        return withContext(Dispatchers.IO) {
+        return withContext(decoder) {
             runCatching {
                 app.assets.open("$DIR/$key.webp").use { BitmapFactory.decodeStream(it) }?.asImageBitmap()
             }.onFailure { Timber.tag("Emoji").w(it, "glyph $key failed to decode") }

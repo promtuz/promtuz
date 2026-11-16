@@ -18,6 +18,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -73,13 +79,14 @@ private object EmojiCatalog {
     suspend fun load(context: Context, index: EmojiPack.Index): List<EmojiCategory> = cached ?: withContext(Dispatchers.IO) {
         val drawable = { e: String -> index.keys.isEmpty() || EmojiSequences.assetKey(e, index) != null }
         files.map { (meta, raws) ->
+            // Emotions and people share a few emoji, and a repeated key crashes the grid when it scrolls in.
             val items = raws.flatMap { raw ->
                 context.resources.openRawResource(raw).bufferedReader().useLines { lines ->
                     lines.mapNotNull { line ->
                         line.split(',').filter { it.isNotBlank() && drawable(it) }.distinct().takeIf { it.isNotEmpty() }?.let(::EmojiItem)
                     }.toList()
                 }
-            }
+            }.distinctBy { it.base }
             EmojiCategory(meta.first, meta.second, meta.third, items)
         }.also { if (index.keys.isNotEmpty()) cached = it }
     }
@@ -179,7 +186,7 @@ private fun EmojiPanelBody(onEmoji: (String) -> Unit, bottomPadding: Dp) {
             items(sections.size, key = { sections[it].key }) { i ->
                 val section = sections[i]
                 val selected = section.key == current
-                val fill by animateColorAsState(if (selected) c.cardHigh else Color.Transparent, label = "emojiTab")
+                val fill by animateColorAsState(if (selected) c.glassFill else Color.Transparent, label = "emojiTab")
                 Box(
                     Modifier.size(40.dp).clip(RoundedCornerShape(Radii.small)).background(fill)
                         .combinedClickable(onClick = { scope.launch { grid.animateScrollToItem(starts[i]) } })
@@ -259,11 +266,22 @@ private fun VariantPicker(item: EmojiItem, index: EmojiPack.Index?, onDismiss: (
 }
 
 /** An emoji drawn from the bundled pack, falling back to the system font when the pack lacks it. */
+// Drawn straight from the cached bitmap: a scrolling grid of hundreds of cells can't afford a layout per glyph.
 @Composable
 private fun PackEmoji(emoji: String, index: EmojiPack.Index?, modifier: Modifier, mono: Boolean = false) {
     val key = remember(emoji, index) { index?.let { EmojiSequences.assetKey(emoji, it) } }
-    Box(modifier, contentAlignment = Alignment.Center) {
-        if (key != null) EmojiGlyph(key, emoji, TextStyle(fontSize = 24.sp), if (mono) Mono else null)
-        else Text(emoji, style = TextStyle(fontSize = 24.sp))
+    if (key == null) {
+        Box(modifier, contentAlignment = Alignment.Center) { Text(emoji, style = TextStyle(fontSize = 24.sp)) }
+        return
     }
+    val context = LocalContext.current
+    val bitmap = remember(key) { mutableStateOf(EmojiPack.peek(key)) }
+    if (bitmap.value == null) LaunchedEffect(key) { bitmap.value = EmojiPack.glyph(context, key) }
+    val filter = if (mono) Mono else null
+    Spacer(modifier.drawBehind {
+        bitmap.value?.let {
+            drawImage(it, dstSize = IntSize(size.width.toInt(), size.height.toInt()), colorFilter = filter,
+                filterQuality = FilterQuality.Medium)
+        }
+    })
 }
