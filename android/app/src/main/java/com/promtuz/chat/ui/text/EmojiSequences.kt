@@ -137,6 +137,9 @@ object EmojiSequences {
         return emoji
     }
 
+    /** The pack's asset for a whole emoji [cluster], or null when the pack has no glyph for it. */
+    fun assetKey(cluster: String, index: EmojiPack.Index): String? = resolve(keyOf(cluster), index.keys, index.aliases)
+
     private fun resolve(key: String, pack: Set<String>, aliases: Map<String, String>): String? {
         if (key in pack) return key
         val target = aliases[key] ?: return null

@@ -57,6 +57,22 @@ class EmojiFieldController {
         hideKeyboard()
         editor?.clearFocus()
     }
+
+    /** Types [text] at the cursor, replacing any selection, as the keyboard would. */
+    fun insert(text: String) {
+        val view = editor ?: return
+        val editable = view.text ?: return
+        val start = view.selectionStart.coerceAtLeast(0)
+        val end = view.selectionEnd.coerceAtLeast(start)
+        editable.replace(start, end, text)
+    }
+
+    /** The keyboard's delete key, so a whole emoji sequence goes at once. */
+    fun backspace() {
+        val view = editor ?: return
+        view.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_DEL))
+        view.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_DEL))
+    }
 }
 
 @Composable

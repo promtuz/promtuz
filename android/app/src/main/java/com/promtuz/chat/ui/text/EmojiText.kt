@@ -118,7 +118,7 @@ fun EmojiText(
 
 /** One glyph from the pack, or the system's rendering of [cluster] until it has decoded. */
 @Composable
-private fun EmojiGlyph(assetKey: String, cluster: String, style: TextStyle) {
+internal fun EmojiGlyph(assetKey: String, cluster: String, style: TextStyle, colorFilter: androidx.compose.ui.graphics.ColorFilter? = null) {
     val context = LocalContext.current
     // produceState's initial value is remembered, even when its producer key changes.
     // Give each asset its own state so an edit cannot display the previous emoji.
@@ -127,7 +127,7 @@ private fun EmojiGlyph(assetKey: String, cluster: String, style: TextStyle) {
             value = EmojiPack.glyph(context, assetKey)
         }
         val bitmap = glyph
-        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit, colorFilter = colorFilter)
         else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(cluster, style = style, maxLines = 1, softWrap = false)
         }

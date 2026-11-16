@@ -347,6 +347,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.google.material)
     implementation(libs.haze)
+    implementation(libs.androidx.emojipicker)
     implementation(libs.haze.blur)
     implementation(libs.haze.glass)
 

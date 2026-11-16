@@ -81,6 +81,15 @@ object ChatPrefs {
         set(v) = put(STICKER_COLUMNS, v.toString())
 
     /** "debug" or "release"; null follows the installed build. */
+    var emojiRecent: List<String>
+        get() = get(EMOJI_RECENT)?.split(' ')?.filter { it.isNotEmpty() }.orEmpty()
+        set(v) = put(EMOJI_RECENT, v.joinToString(" "))
+
+    /** The skin tone picked for each base emoji, so a tap repeats the last choice. */
+    var emojiTones: Map<String, String>
+        get() = get(EMOJI_TONES)?.split(' ')?.mapNotNull { it.split('>').takeIf { p -> p.size == 2 }?.let { p -> p[0] to p[1] } }?.toMap().orEmpty()
+        set(v) = put(EMOJI_TONES, v.entries.joinToString(" ") { "${it.key}>${it.value}" })
+
     var updateChannel: String?
         get() = get(UPDATE_CHANNEL)
         set(v) = put(UPDATE_CHANNEL, v.orEmpty())
@@ -109,6 +118,8 @@ object ChatPrefs {
     private const val NOTIF_BUZZ = "notif_buzz"
     private const val UPDATE_CHANNEL = "update_channel"
     private const val STICKER_COLUMNS = "sticker_columns"
+    private const val EMOJI_RECENT = "emoji_recent"
+    private const val EMOJI_TONES = "emoji_tones"
 }
 
 enum class NotifBuzz { EveryMessage, Throttled, FirstOnly }

@@ -305,7 +305,10 @@ fun ChatBottomBar(
                         }
                     },
                 )
-                ComposerPanelKind.Stickers -> {
+                ComposerPanelKind.Stickers -> EmojiStickerPanel(
+                    onEmoji = field::insert,
+                    onBackspace = field::backspace,
+                ) { bottom ->
                     val stickers = koinViewModel<StickersVM>()
                     val packs by stickers.packs.collectAsState()
                     val recents by stickers.recents.collectAsState()
@@ -316,6 +319,7 @@ fun ChatBottomBar(
                         onPick = viewModel::sendSticker,
                         onCreate = { closeFlat(); onCreateStickerPack() },
                         onManage = { closeFlat(); onManageStickers() },
+                        bottomPadding = bottom,
                     )
                 }
             }
