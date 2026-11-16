@@ -31,7 +31,13 @@ data class PromtuzColors(
     val bubbleIn: Color,
     val wallpaper: Color,
     val isDark: Boolean,
-)
+) {
+    /** A selection or hover on glass: translucent, so the frost still shows through. */
+    val glassFill: Color get() = text.copy(alpha = if (isDark) 0.1f else 0.07f)
+
+    /** A card or field resting on glass, light enough that the frost reads through it. */
+    val glassCard: Color get() = text.copy(alpha = if (isDark) 0.06f else 0.04f)
+}
 
 val DarkPromtuzColors = PromtuzColors(
     page = Color(0xFF101113),

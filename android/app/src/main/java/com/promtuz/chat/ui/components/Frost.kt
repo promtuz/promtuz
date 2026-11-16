@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.drawWithCache
@@ -29,6 +30,8 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.theme.Radii
 import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazeProgressive
+import androidx.compose.ui.graphics.Brush
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.HazeColorEffect
@@ -38,6 +41,17 @@ enum class FrostRole { Bar, ChatBar, Sheet, Floating }
 
 /** Sources the whole activity content, so separate windows (dialogs, popups, sheets) can blur what lies under them. */
 val LocalRootHaze = staticCompositionLocalOf<HazeState?> { null }
+
+/** True inside a frosted host (sheet, dialog, menu, composer panel); cards and fills there turn translucent. */
+val LocalOnGlass = staticCompositionLocalOf { false }
+
+/** A card's fill: opaque on a page, translucent on glass. */
+@Composable
+fun cardFill(): Color = if (LocalOnGlass.current) Promtuz.colors.glassCard else Promtuz.colors.card
+
+/** A raised fill inside a card or a selection: opaque on a page, translucent on glass. */
+@Composable
+fun raisedFill(): Color = if (LocalOnGlass.current) Promtuz.colors.glassFill else Promtuz.colors.cardHigh
 
 val SheetShape = RoundedCornerShape(topStart = Radii.sheet, topEnd = Radii.sheet)
 
@@ -72,9 +86,8 @@ private fun rememberFrostStyle(role: FrostRole, scrolled: State<() -> Float>): H
                     val tint = lerp(c.page, c.card, scrolled.value().coerceIn(0f, 1f))
                     frost(c.page, tint.copy(alpha = if (c.isDark) 0.76f else 0.74f), 36f)
                 }
-                FrostRole.ChatBar -> frost(chatBar, chatBar.copy(alpha = 0.76f), 38f)
-                FrostRole.Sheet -> frost(c.card, c.card.copy(alpha = if (c.isDark) 0.82f else 0.9f), 36f)
-                FrostRole.Floating -> frost(c.card, c.glass, 36f)
+                // Sheets, dialogs and menus share the composer's glass so every floating layer reads alike.
+                FrostRole.ChatBar, FrostRole.Sheet, FrostRole.Floating -> frost(chatBar, chatBar.copy(alpha = 0.76f), 38f)
             }
         }
     }
@@ -135,4 +148,26 @@ private fun Modifier.rim(shape: Shape, dark: Boolean): Modifier = drawWithCache 
         drawPath(top, topColor)
         drawPath(bottom, bottomColor)
     }
+}
+
+/**
+ * A top bar's backdrop with no edge: the composer's glass, its blur and tint thinning to nothing at the bar's
+ * bottom. Goes behind the bar's content as a sibling.
+ */
+@Composable
+fun FrostFade(haze: HazeState, modifier: Modifier = Modifier) {
+    val bar = LocalChatColors.current.bar
+    val style = remember(bar) {
+        HazeBlurStyle {
+            noiseFactor(0f)
+            backgroundColor(bar)
+            blurRadius(32.dp)
+            progressive(HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = 0f))
+            // No saturation boost: at rest over a plain page the bar must match it exactly.
+            val tint = HazeColorEffect.tint(Brush.verticalGradient(0f to bar.copy(alpha = 0.7f), 1f to bar.copy(alpha = 0f)))
+            colorEffects(listOf(tint))
+            fallbackColorEffect(tint)
+        }
+    }
+    androidx.compose.foundation.layout.Box(modifier.hazeBlur(HazeInput.Sources(haze), style))
 }

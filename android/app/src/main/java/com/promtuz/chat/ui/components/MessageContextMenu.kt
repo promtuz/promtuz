@@ -103,7 +103,7 @@ fun MessageContextMenu(
     val density = LocalDensity.current
 
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
-        MenuBackdrop(state, haze, dim = 0.2f, scrimMs = 320, popMs = 250, exitMs = 160)
+        MenuBackdrop(state, dim = 0.3f, scrimMs = 320, popMs = 250, exitMs = 160)
 
         // Laid out at the captured row width so it wraps exactly as it did in the list.
         Box(

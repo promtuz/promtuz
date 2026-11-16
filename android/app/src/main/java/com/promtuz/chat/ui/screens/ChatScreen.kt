@@ -51,6 +51,7 @@ import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import com.promtuz.chat.presentation.viewmodel.pendingChatSearch
 import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.ui.components.MessageInfoSheet
 import com.promtuz.chat.ui.components.StickerPackSheet
@@ -98,6 +99,10 @@ private fun openAttachment(context: Context, path: String) {
 
 @Composable
 fun ChatScreen(routeName: String, viewModel: ChatVM) {
+    val pendingSearch by pendingChatSearch.collectAsState()
+    LaunchedEffect(pendingSearch) {
+        if (pendingSearch == viewModel.conversationHex) { viewModel.openSearch(); pendingChatSearch.value = null }
+    }
     val foreground = com.promtuz.chat.navigation.LocalNavForeground.current
     if (foreground) androidx.lifecycle.compose.LifecycleResumeEffect(viewModel) {
         com.promtuz.core.push.PushNotifier.viewing(viewModel.conversationHex, true)

@@ -3,6 +3,8 @@ package com.promtuz.chat.ui.theme
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.material3.LocalRippleConfiguration
+import androidx.compose.material3.RippleConfiguration
+import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.MaterialExpressiveTheme
 import com.promtuz.chat.ui.components.PressHighlight
 import androidx.compose.runtime.Composable
@@ -51,10 +53,12 @@ fun PromtuzTheme(
             colorScheme = colorScheme,
             typography = Typography,
         ) {
-            // Material's ripple paints over a control and flattens it; the app has its own press feel.
+            // The app's ripple for everything it builds; stock Material controls keep theirs, matched in tint.
             CompositionLocalProvider(
                 LocalIndication provides PressHighlight,
-                LocalRippleConfiguration provides null,
+                LocalRippleConfiguration provides remember(palette) {
+                    RippleConfiguration(palette.text, RippleAlpha(0.1f, 0.1f, 0.06f, 0.1f))
+                },
                 content = content,
             )
         }

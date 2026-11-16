@@ -152,6 +152,9 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             if (presence == Presence.Online) chatTheme.accent else colors.onSurfaceVariant
     }
 
+    // freezeOnExit bakes the blur while the card scales out; Haze shatters under an ancestor scale.
+    Box(Modifier.freezeOnExit()) {
+    FrostFade(haze, Modifier.matchParentSize())
     TopAppBar(
         title = {
             if (searching) SearchField(chatVM, searchQuery.orEmpty()) else Row(
@@ -222,12 +225,9 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             )
             }
         },
-        // freezeOnExit bakes the blur while the card scales out; Haze shatters under an ancestor scale.
-        modifier = Modifier
-            .freezeOnExit()
-            .frost(haze, FrostRole.ChatBar),
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
+    }
 
     if (confirmClear) ClearHistoryDialog(
         name = name,

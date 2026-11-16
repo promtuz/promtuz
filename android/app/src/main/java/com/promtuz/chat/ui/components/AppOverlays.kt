@@ -79,7 +79,9 @@ internal fun AppModal(
                     .pointerInput(Unit) { detectTapGestures { } }
                     .semantics { paneTitle = "Dialog" },
                 propagateMinConstraints = true,
-            ) { content() }
+            ) {
+                CompositionLocalProvider(LocalOnGlass provides true, LocalContentColor provides Promtuz.colors.text) { content() }
+            }
         }
     }
 }
@@ -106,7 +108,9 @@ val ModalShape = RoundedCornerShape(Radii.modal)
 @Composable
 internal fun ModalActions(confirmButton: @Composable () -> Unit, dismissButton: (@Composable () -> Unit)?) {
     val direction = LocalLayoutDirection.current
+    // The buttons sit about 8dp in from the dialog's edge (the footer's padding plus their touch margin).
     Box(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), contentAlignment = Alignment.CenterEnd) {
+        CompositionLocalProvider(LocalTextButtonShape provides RoundedCornerShape(concentric(Radii.modal, 8.dp))) {
         CompositionLocalProvider(LocalLayoutDirection provides
             if (direction == LayoutDirection.Ltr) LayoutDirection.Rtl else LayoutDirection.Ltr) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
@@ -115,6 +119,7 @@ internal fun ModalActions(confirmButton: @Composable () -> Unit, dismissButton: 
                     dismissButton?.invoke()
                 }
             }
+        }
         }
     }
 }

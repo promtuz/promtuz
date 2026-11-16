@@ -204,6 +204,7 @@ class ChatVM(
     val jump: SharedFlow<String> = _jump.asSharedFlow()
 
     fun openSearch() { searchQuery.value = "" }
+
     fun closeSearch() { searchQuery.value = null; _hits.value = emptyList(); hitDepth = emptyList() }
     fun nextHit() = stepHit(1)
     fun prevHit() = stepHit(-1)
@@ -952,3 +953,6 @@ private fun MediaRecord.toContent(dispatchIdHex: String, caption: String, cacheI
         localPath = localPath,
         durationMs = durationMs.toLong(),
     )
+
+/** A chat to open in search mode, asked for from its info page. */
+val pendingChatSearch = MutableStateFlow<String?>(null)

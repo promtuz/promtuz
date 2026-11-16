@@ -59,7 +59,7 @@ enum class ButtonKind { Primary, Tonal, Danger }
 
 private val ButtonText = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
 
-/** Dims while held; a busy button keeps its size and swaps the label for a spinner. */
+/** Ripples like every other control; a busy button keeps its size and swaps the label for a spinner. */
 @Composable
 fun AppButton(
     text: String,
@@ -89,17 +89,16 @@ fun AppButton(
     val (bg, fg) = when {
         !enabled -> c.switchOff to c.muted
         kind == ButtonKind.Primary -> c.accentFill to Color.White
-        kind == ButtonKind.Tonal -> c.cardHigh to c.accent
+        kind == ButtonKind.Tonal -> raisedFill() to c.accent
         else -> c.danger.copy(alpha = 0.14f) to c.danger
     }
     val background by animateColorAsState(bg, label = "buttonBg")
     val interaction = remember { MutableInteractionSource() }
     Row(
         modifier
-            .pressDim(interaction, enabled && !busy)
             .clip(shape)
             .background(background)
-            .clickable(interaction, null, enabled && !busy, role = Role.Button, onClick = onClick)
+            .clickable(interaction, PressHighlight, enabled && !busy, role = Role.Button, onClick = onClick)
             .heightIn(min = 52.dp)
             .padding(horizontal = 24.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
@@ -194,7 +193,7 @@ fun AppSwitch(
     )
 }
 
-/** A 44 rounded-rectangle touch target for a 24 glyph. */
+/** A 24 glyph on the app's [IconButton]. */
 @Composable
 fun AppIconButton(
     @DrawableRes icon: Int,
@@ -204,13 +203,9 @@ fun AppIconButton(
     tint: Color = Promtuz.colors.text,
     enabled: Boolean = true,
 ) {
-    Box(
-        modifier
-            .size(44.dp)
-            .clip(RoundedCornerShape(Radii.iconButton))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) { DrawableIcon(icon, desc = contentDescription.orEmpty(), size = 24.dp, tint = tint) }
+    IconButton(onClick, modifier, enabled) {
+        DrawableIcon(icon, desc = contentDescription.orEmpty(), size = 24.dp, tint = tint)
+    }
 }
 
 /**
@@ -289,10 +284,12 @@ fun AppSlider(
 @Composable
 fun SegmentedTabs(labels: List<String>, selected: Int, modifier: Modifier = Modifier, onSelect: (Int) -> Unit) {
     val c = Promtuz.colors
-    Row(modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(4.dp)) {
+    val track = cardFill()
+    val thumb = raisedFill()
+    Row(modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(track).padding(4.dp)) {
         labels.forEachIndexed { i, label ->
             val on = i == selected
-            val fill by animateColorAsState(if (on) c.cardHigh else Color.Transparent, com.promtuz.chat.ui.stage.ChatMotion.spec(), label = "tab")
+            val fill by animateColorAsState(if (on) thumb else Color.Transparent, com.promtuz.chat.ui.stage.ChatMotion.spec(), label = "tab")
             Box(
                 Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(concentric(Radii.card, 4.dp))).background(fill)
                     .clickable(role = Role.Tab) { onSelect(i) },

@@ -42,11 +42,10 @@ fun HomeScreen(
     }
     val haze = rememberHazeState()
     val menuHaze = rememberHazeState()
-    val scrolled by animateFloatAsState(if (listState.canScrollBackward) 1f else 0f, label = "homeBarGlass")
     val page = Promtuz.colors.page
     Box {
         Box(Modifier.hazeSource(menuHaze)) { Scaffold(
-            topBar = { HomeTopBar(appViewModel, showSearch = searchHidden, haze = haze, glass = { scrolled }) },
+            topBar = { HomeTopBar(appViewModel, showSearch = searchHidden, haze = haze) },
             floatingActionButton = { HomeFab(appViewModel) },
             containerColor = page,
         ) { innerPadding ->

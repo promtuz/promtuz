@@ -85,6 +85,7 @@ fun AppBottomSheet(
                 }
                 .sheetSurface(),
         ) {
+            androidx.compose.runtime.CompositionLocalProvider(LocalOnGlass provides true) {
             Column(Modifier.windowInsetsPadding(contentWindowInsets())) {
                 Box(
                     Modifier
@@ -101,6 +102,7 @@ fun AppBottomSheet(
                     )
                 }
                 content()
+            }
             }
         }
     }

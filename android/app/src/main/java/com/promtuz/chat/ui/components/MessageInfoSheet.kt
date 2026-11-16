@@ -131,7 +131,7 @@ private fun MessageInfoPreview(conversationHex: String, message: UiMessage) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         if (thumbnail != null || icon != null) Box(
-            Modifier.size(52.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(com.promtuz.chat.ui.theme.Promtuz.colors.cardHigh),
+            Modifier.size(52.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(raisedFill()),
             contentAlignment = Alignment.Center,
         ) {
             if (thumbnail != null) Image(thumbnail, null, Modifier.fillMaxSize(),

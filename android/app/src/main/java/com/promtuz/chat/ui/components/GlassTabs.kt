@@ -42,9 +42,9 @@ fun GlassTabBar(haze: HazeState, modifier: Modifier = Modifier, content: @Compos
 @Composable
 fun GlassTab(label: String, @DrawableRes icon: Int?, selected: Boolean, onClick: () -> Unit) {
     val c = Promtuz.colors
-    val tint by animateColorAsState(if (selected) (if (icon == null) Color.White else c.accent) else c.text, label = "tabTint")
-    val fill by animateColorAsState(
-        if (!selected) Color.Transparent else if (icon == null) c.accentFill else c.accent.copy(alpha = 0.2f), label = "tabFill")
+    // A lighter pane of the same glass, never a solid chip sitting on it.
+    val tint by animateColorAsState(if (selected) c.accent else c.text, label = "tabTint")
+    val fill by animateColorAsState(if (selected) c.glassFill else Color.Transparent, label = "tabFill")
     val shape = RoundedCornerShape(concentric(Radii.pill, 4.dp))
     if (icon != null) Column(
         Modifier.size(80.dp, 48.dp).clip(shape).background(fill)

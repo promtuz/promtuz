@@ -2,6 +2,7 @@ package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.TopAppBar
@@ -22,12 +23,10 @@ fun HomeTopBar(
     appViewModel: AppVM,
     showSearch: Boolean = false,
     haze: HazeState? = null,
-    glass: () -> Float = { 0f },
 ) {
+    Box(if (haze == null) Modifier else Modifier.freezeOnExit()) {
+    if (haze != null) FrostFade(haze, Modifier.matchParentSize())
     TopAppBar(
-        modifier = if (haze == null) Modifier else Modifier
-            .freezeOnExit()
-            .frost(haze, FrostRole.Bar, scrolled = glass),
         colors = transparentTopAppBar(),
         expandedHeight = 60.dp,
         navigationIcon = {
@@ -56,4 +55,5 @@ fun HomeTopBar(
             AppUpdateIcon(onClick = { appViewModel.navigator.push(Routes.Updates) })
             HomeMoreMenu(appViewModel, showSearch = showSearch)
         })
+    }
 }

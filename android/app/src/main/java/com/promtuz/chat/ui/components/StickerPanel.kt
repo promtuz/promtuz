@@ -113,7 +113,7 @@ fun StickerPanelBody(
                 items(sections, key = { it.key }) { section ->
                     val selected = section.key == current
                     val background by animateColorAsState(
-                        if (selected) c.cardHigh else Color.Transparent,
+                        if (selected) c.glassFill else Color.Transparent,
                         ChatMotion.spec(),
                         label = "pack selection",
                     )

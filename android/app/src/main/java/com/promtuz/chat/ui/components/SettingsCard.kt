@@ -84,7 +84,7 @@ fun SettingsCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Radii.card))
-                .background(c.card)
+                .background(cardFill())
                 .drawWithContent {
                     drawContent()
                     val rtl = layoutDirection == LayoutDirection.Rtl
@@ -244,13 +244,13 @@ fun Modifier.cardRow(start: Dp = Inset): Modifier = dividerInset(start)
  * A row standing in for a card when the list is too long for one [SettingsCard]: row [index] of
  * [count] as a lazy item, rounding the card's ends and drawing the divider above itself.
  */
-fun Modifier.lazyCardRow(index: Int, count: Int, dividerStart: Dp = Inset): Modifier = composed {
+fun Modifier.lazyCardRow(index: Int, count: Int, dividerStart: Dp = Inset, divider: Boolean = index != 0): Modifier = composed {
     val c = Promtuz.colors
-    clip(groupedRoundShape(index, count, major = Radii.card.value.toInt(), minor = 0))
-        .background(c.card)
+    clip(groupedRoundShape(index, count, major = Radii.card))
+        .background(cardFill())
         .drawWithContent {
             drawContent()
-            if (index == 0) return@drawWithContent
+            if (!divider) return@drawWithContent
             val rtl = layoutDirection == LayoutDirection.Rtl
             val y = 0.5.dp.toPx()
             val a = dividerStart.toPx(); val b = size.width - Inset.toPx()
@@ -311,7 +311,7 @@ private fun <T> ChoicePopup(
                     Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.tile))
-                        .background(if (on) c.cardHigh else Color.Transparent)
+                        .background(if (on) c.glassFill else Color.Transparent)
                         .clickable(role = Role.RadioButton) { onPick(choice.value) }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),

@@ -134,6 +134,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     var leaving by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     var removingLock by remember { mutableStateOf(false) }
+    var clearing by remember { mutableStateOf(false) }
     val privateIds by app.privateIds.collectAsState()
     val locked = conversation != null && conversation in privateIds
     val busy = work is GroupWork.Busy
@@ -163,10 +164,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     }, actions = {
         if (conversation != null) AppDropMenu(
             anchor = { DrawableIcon(com.promtuz.chat.R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Group options") },
-            groups = listOf(listOf(
-                if (locked) MenuAction("Remove lock", com.promtuz.chat.R.drawable.oi_lock_chat_open) { removingLock = true }
-                else MenuAction("Lock chat", com.promtuz.chat.R.drawable.oi_lock_chat) { app.navigator.push(com.promtuz.chat.navigation.Routes.LockChat(conversation)) },
-            ), buildList {
+            groups = listOf(buildList {
                 if (canEdit) add(MenuAction("Edit name", com.promtuz.chat.R.drawable.oi_edit) { draft = title; editing = true; actions.clearError() })
                 if (canEdit) add(MenuAction("Set group photo", com.promtuz.chat.R.drawable.oi_camera) {
                     picker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
@@ -177,9 +175,14 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                             .onFailure { snackbar.showSnackbar("Couldn't remove group photo") }
                     }
                 })
+            }, listOf(
+                if (locked) MenuAction("Remove lock", com.promtuz.chat.R.drawable.oi_lock_chat_open) { removingLock = true }
+                else MenuAction("Lock chat", com.promtuz.chat.R.drawable.oi_lock_chat) { app.navigator.push(com.promtuz.chat.navigation.Routes.LockChat(conversation)) },
+            ), buildList {
+                if (!locked) add(MenuAction("Clear history", com.promtuz.chat.R.drawable.oi_broom) { clearing = true })
             }).filter { it.isNotEmpty() },
         )
-    }) { padding ->
+    }) { padding, list ->
         Box(Modifier.fillMaxSize()) {
             if (loading || loadError) {
                 Column(Modifier.fillMaxWidth().padding(padding).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -189,14 +192,16 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                         TextButton(onClick = { actions.reload() }) { Text("Retry") }
                     }
                 }
-            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(top = 12.dp, bottom = 80.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            } else LazyColumn(Modifier.fillMaxSize(), list, contentPadding = padding.listPadding(top = 12.dp, bottom = 80.dp)) {
                 if (conversation != null) item("actions") {
                     ProfileActions(listOf(
                         MenuAction("Message", com.promtuz.chat.R.drawable.i_send) { app.openChat(conversation, displayName) },
                         MenuAction(if (muted) "Unmute" else "Mute",
                             if (muted) com.promtuz.chat.R.drawable.i_speaker else com.promtuz.chat.R.drawable.i_volume_off) {
                             if (!busy) actions.setMuted(!muted)
+                        },
+                        MenuAction("Search", com.promtuz.chat.R.drawable.oi_search) {
+                            pendingChatSearch.value = conversation; app.openChat(conversation, displayName)
                         },
                     ))
                 }
@@ -223,7 +228,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 var index = 0
                 val headerIndex = index++
                 item("members-header") {
-                    Box(Modifier.fillMaxWidth().lazyCardRow(headerIndex, rows)) {
+                    Box(Modifier.padding(top = 12.dp).fillMaxWidth().lazyCardRow(headerIndex, rows)) {
                         Text(memberTally(active.size), Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp),
                             style = SectionHeaderStyle, color = Promtuz.colors.accent)
                     }
@@ -231,7 +236,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 if (canAdd) {
                     val i = index++
                     item("members-add") {
-                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 70.dp)) {
+                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 58.dp, divider = i > 1)) {
                             SettingsRow("Add members", icon = com.promtuz.chat.R.drawable.i_user_add, titleColor = Promtuz.colors.accent,
                                 enabled = !busy, onClick = { adding = true; selected = emptySet(); query = ""; searching = false; actions.clearError() })
                         }
@@ -245,7 +250,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 if (more > 0) {
                     val i = index++
                     item("members-more") {
-                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 70.dp)) {
+                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 58.dp)) {
                             SettingsRow("Show $more more", icon = com.promtuz.chat.R.drawable.i_users, titleColor = Promtuz.colors.accent,
                                 onClick = { showAll = true })
                         }
@@ -254,7 +259,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 if (past.isNotEmpty()) {
                     val i = index++
                     item("members-past") {
-                        Box(Modifier.lazyCardRow(i, rows, dividerStart = 70.dp)) {
+                        Box(Modifier.lazyCardRow(i, rows)) {
                             SettingsRow(if (showPast) "Hide past members" else "Past members", value = if (showPast) null else past.size.toString(),
                                 titleColor = Promtuz.colors.accent, onClick = { showPast = !showPast })
                         }
@@ -266,7 +271,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                 }
                 if (ownerIsStuck) {
                     item("stuck") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("You own this group. To leave, first remove the other members.",
                                 Modifier.padding(horizontal = 16.dp), style = FootnoteStyle, color = Promtuz.colors.muted)
                             SettingsCard { SettingsRow("Delete chat", titleColor = Promtuz.colors.danger, enabled = !busy,
@@ -274,7 +279,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                         }
                     }
                 } else if (canLeave) item("leave") {
-                    SettingsCard { SettingsRow("Leave group", titleColor = Promtuz.colors.danger, enabled = !busy,
+                    SettingsCard(Modifier.padding(top = 12.dp)) { SettingsRow("Leave group", titleColor = Promtuz.colors.danger, enabled = !busy,
                         onClick = { leaving = true; actions.clearError() }) }
                 }
             }
@@ -347,6 +352,8 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
     GroupConfirmation("Delete chat?",
         "This deletes your messages and group access from this device. Other members keep the group, but no one will be able to add or remove members. This can’t be undone.",
         "Delete", work, { deleting = false; actions.clearError() }, { actions.deleteAnyway() }, visible = deleting)
+    if (clearing && conversation != null) ClearHistoryDialog(displayName,
+        onConfirm = { clearing = false; app.clearHistory(conversation) }, onDismiss = { clearing = false })
     if (removingLock && conversation != null) RemoveLockDialog(app, conversation, displayName) { removingLock = false }
 }
 
@@ -373,7 +380,7 @@ private fun GroupMemberRow(member: UiMember, index: Int, count: Int, enabled: Bo
             onClick = onClick.takeIf { !menu },
         )
     }
-    Box(Modifier.lazyCardRow(index, count, dividerStart = 70.dp)) {
+    Box(Modifier.lazyCardRow(index, count, dividerStart = 78.dp, divider = index > 1)) {
         if (!menu) row()
         else AppDropMenu(anchor = row, groups = listOf(actions), onClick = onClick, onClickLabel = "Open profile",
             onLongClickLabel = "Member options")

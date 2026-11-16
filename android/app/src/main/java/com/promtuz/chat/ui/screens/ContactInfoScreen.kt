@@ -46,6 +46,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     val canSecret = chat?.kind == 0 && chat.status == 1 && !chat.request
     var removingLock by remember { mutableStateOf(false) }
     var starting by remember { mutableStateOf(false) }
+    var clearing by remember { mutableStateOf(false) }
     val directConversation = chat?.conversationHex ?: conversation
     val picture = rememberAvatar(peer)
     val name = profile?.nickname?.ifBlank { profile?.name.orEmpty() }?.ifBlank { chat?.name.orEmpty() }
@@ -92,6 +93,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                     }
                 })
             },
+            buildList { if (chat != null && !hidden) add(MenuAction("Clear history", R.drawable.oi_broom) { clearing = true }) },
             buildList {
                 if (BuildConfig.DEBUG && !hidden) add(MenuAction("Debug info", R.drawable.oi_info) {
                     scope.launch {
@@ -103,8 +105,8 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
             },
             buildList { if (chat != null && !chat.isSecret) add(MenuAction("Delete contact", R.drawable.oi_trash, destructive = true) { deleting = true }) },
         ).filter { it.isNotEmpty() })
-    }) { padding ->
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.listPadding(top = 12.dp, bottom = 24.dp),
+    }) { padding, list ->
+        LazyColumn(Modifier.fillMaxSize(), list, contentPadding = padding.listPadding(top = 12.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item("actions") {
                 ProfileActions(buildList {
@@ -116,6 +118,10 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                         if (chat.muted) R.drawable.i_speaker else R.drawable.i_volume_off) {
                         scope.launch { runCatching { CoreBridge.setConversationMuted(chat.conversationHex.fromHex(), !chat.muted) }
                             .onFailure { error = "Couldn't change notifications" } }
+                    })
+                    if (chat != null) add(MenuAction("Search", R.drawable.oi_search) {
+                        com.promtuz.chat.presentation.viewmodel.pendingChatSearch.value = chat.conversationHex
+                        app.openChat(chat.conversationHex, name)
                     })
                 })
             }
@@ -158,5 +164,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
         dismissButton = { TextButton(onClick = { deleting = false }) { Text("Cancel") } })
     debug?.let { AppAlertDialog(onDismissRequest = { debug = null }, title = { Text("Debug info") }, text = { Text(it) },
         confirmButton = { TextButton(onClick = { debug = null }) { Text("Close") } }) }
+    if (clearing && chat != null) ClearHistoryDialog(name,
+        onConfirm = { clearing = false; app.clearHistory(chat.conversationHex) }, onDismiss = { clearing = false })
     if (removingLock && chat != null) RemoveLockDialog(app, chat.conversationHex, chat.name) { removingLock = false }
 }

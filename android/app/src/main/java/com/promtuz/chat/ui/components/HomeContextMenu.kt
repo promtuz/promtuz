@@ -30,7 +30,7 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 
 /** [pressRoot] is where the finger went down, in root coordinates. */
-/** [row] and [snapshot] lift the pressed row above the blurred backdrop so it's clear which chat the menu acts on. */
+/** [row] and [snapshot] lift the pressed row above the scrim so it's clear which chat the menu acts on. */
 data class HomeMenuAnchor(
     val pressRoot: Offset,
     val groups: List<List<MenuAction>>,
@@ -47,7 +47,7 @@ fun HomeContextMenu(state: HomeMenuState, haze: HazeState) {
 
     var origin by remember { mutableStateOf(Offset.Zero) }
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
-        MenuBackdrop(state, haze, dim = 0.28f, scrimMs = 300, popMs = 220, exitMs = 150)
+        MenuBackdrop(state, dim = 0.36f, scrimMs = 300, popMs = 220, exitMs = 150)
         val row = anchor.row
         val snapshot = anchor.snapshot
         if (row != null && snapshot != null) {

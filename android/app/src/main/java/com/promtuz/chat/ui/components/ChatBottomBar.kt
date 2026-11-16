@@ -47,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
@@ -288,6 +289,7 @@ fun ChatBottomBar(
             haze = haze,
             onHideKeyboard = { field.hideKeyboard() },
         ) {
+            CompositionLocalProvider(LocalOnGlass provides true) {
             when (shownPanel) {
                 ComposerPanelKind.Attach -> AttachPanelBody(
                     allowPhotos = editing?.acceptsStaged(STAGED_IMAGE) ?: true,
@@ -322,6 +324,7 @@ fun ChatBottomBar(
                         bottomPadding = bottom,
                     )
                 }
+            }
             }
         }
     }) { children, constraints ->

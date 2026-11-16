@@ -55,7 +55,7 @@ fun GroupNameDialog(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { if (valid) onConfirm() }),
                     modifier = Modifier.fillMaxWidth().focusRequester(focus).semantics { contentDescription = "Group name" }
-                        .clip(RoundedCornerShape(Radii.field)).background(Promtuz.colors.cardHigh).padding(horizontal = 18.dp, vertical = 18.dp),
+                        .clip(RoundedCornerShape(Radii.field)).background(cardFill()).padding(horizontal = 18.dp, vertical = 18.dp),
                     decorationBox = { inner -> Box {
                         if (value.isEmpty()) Text("Group name", color = Promtuz.colors.muted,
                             style = MaterialTheme.typography.titleMedium)

@@ -52,6 +52,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -68,6 +69,8 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.positionOnScreen
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -83,10 +86,6 @@ import kotlinx.coroutines.launch
 import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.theme.Radii
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeInput
-import dev.chrisbanes.haze.blur.HazeBlurStyle
-import dev.chrisbanes.haze.blur.HazeColorEffect
-import dev.chrisbanes.haze.blur.hazeBlur
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -136,31 +135,22 @@ fun AppDropMenu(
     var expanded by remember { mutableStateOf(false) }
     var tapHeld by remember { mutableStateOf(false) } // opened by a tap -> allow outside-tap dismiss
     var hovered by remember { mutableIntStateOf(-1) }
-    var menuWidthPx by remember { mutableIntStateOf(0) }
+    val rows = remember { mutableMapOf<Int, Rect>() }
+    var anchorCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val vis = remember { MutableTransitionState(false) }
     vis.targetState = expanded
 
-    fun close() { expanded = false; tapHeld = false; hovered = -1 }
+    fun close() { expanded = false; tapHeld = false; hovered = -1; rows.clear() }
 
     Box(modifier) {
         Box(
             Modifier
-                .pointerInput(onClick != null, touchExploration, itemHeight, verticalPadding, offset) {
-                    val itemPx = itemHeight.toPx()
-                    val vpadPx = verticalPadding.toPx()
-                    val offX = offset.x.toPx()
-                    val offY = offset.y.toPx()
-
-                    // The Popup is a separate window, so items can't be hit-tested directly. The menu
-                    // covers the anchor, right-aligned, so the finger maps to an item by math.
+                .onGloballyPositioned { anchorCoords = it }
+                .pointerInput(onClick != null, touchExploration) {
+                    // The Popup is a separate window, so rows are hit-tested in screen space.
                     fun indexAt(p: Offset): Int {
-                        if (menuWidthPx == 0) return -1
-                        val top = offY
-                        val right = size.width + offX
-                        if (p.y < top + vpadPx) return -1
-                        if (p.x < right - menuWidthPx || p.x > right) return -1
-                        val i = ((p.y - top - vpadPx) / itemPx).toInt()
-                        return if (i in flat.indices) i else -1
+                        val at = (anchorCoords?.takeIf { it.isAttached } ?: return -1).positionOnScreen() + p
+                        return rows.entries.firstOrNull { it.value.contains(at) }?.key ?: -1
                     }
 
                     awaitEachGesture {
@@ -222,8 +212,9 @@ fun AppDropMenu(
         ) { anchor() }
 
         if (vis.currentState || vis.targetState) {
+            // The popup window is padded so the card's shadow isn't cut at the window's edge.
             val offXpx = with(density) { offset.x.roundToPx() }
-            val offYpx = with(density) { offset.y.roundToPx() }
+            val offYpx = with(density) { (offset.y - PopupPad.calculateTopPadding()).roundToPx() }
             Popup(
                 alignment = Alignment.TopEnd,
                 offset = IntOffset(offXpx, offYpx),
@@ -240,7 +231,8 @@ fun AppDropMenu(
                     MenuCard(
                         groups = groups,
                         hovered = hovered,
-                        modifier = Modifier.onSizeChanged { menuWidthPx = it.width },
+                        modifier = Modifier.pointerInput(Unit) { detectTapGestures { close() } }.padding(PopupPad),
+                        onRowPositioned = { i, c -> rows[i] = Rect(c.positionOnScreen(), c.size.toSize()) },
                         itemHeight = itemHeight,
                         verticalPadding = verticalPadding,
                         shape = shape,
@@ -333,11 +325,13 @@ open class DragMenuState<A : Any>(maxTargets: Int) {
     }
 }
 
+private val PopupPad = PaddingValues(start = 24.dp, end = 8.dp, top = 8.dp, bottom = 32.dp)
+
 internal val Overshoot = Easing { OvershootInterpolator(1.1f).getInterpolation(it) }
 
-/** Blurs, dims and guards the screen behind a [DragMenuState] menu, and plays the menu's pop in and out. */
+/** Dims and guards the screen behind a [DragMenuState] menu, and plays the menu's pop in and out. */
 @Composable
-internal fun MenuBackdrop(state: DragMenuState<*>, haze: HazeState, dim: Float, scrimMs: Int, popMs: Int, exitMs: Int) {
+internal fun MenuBackdrop(state: DragMenuState<*>, dim: Float, scrimMs: Int, popMs: Int, exitMs: Int) {
     androidx.activity.compose.BackHandler(!state.closing) { state.close() }
     LaunchedEffect(Unit) {
         launch { state.scrim.animateTo(dim, tween(scrimMs, easing = EaseOutQuint)) }
@@ -350,20 +344,10 @@ internal fun MenuBackdrop(state: DragMenuState<*>, haze: HazeState, dim: Float, 
             state.closed()
         }
     }
-    val style = remember(dim) {
-        val scrim = HazeColorEffect.tint(Color.Black.copy(alpha = dim))
-        HazeBlurStyle {
-            blurRadius(20.dp)
-            noiseFactor(0f)
-            colorEffects(listOf(scrim))
-            fallbackColorEffect(scrim)
-            alpha((state.scrim.value / dim).coerceIn(0f, 1f))
-        }
-    }
     Box(
         Modifier
             .fillMaxSize()
-            .hazeBlur(HazeInput.Sources(haze), style)
+            .drawBehind { drawRect(Color.Black.copy(alpha = state.scrim.value)) }
             .pointerInput(Unit) { detectTapGestures { state.close() } },
     )
 }
@@ -383,10 +367,11 @@ fun MenuCard(
     onPick: (MenuAction) -> Unit,
 ) {
     Box(modifier.floatingSurface(shape, haze)) {
-        Column(Modifier.width(IntrinsicSize.Max).padding(vertical = verticalPadding + 6.dp)) {
+        androidx.compose.runtime.CompositionLocalProvider(LocalOnGlass provides true) {
+        Column(Modifier.width(IntrinsicSize.Max).padding(vertical = verticalPadding)) {
             var i = 0
             groups.forEachIndexed { gi, group ->
-                if (gi != 0) HorizontalDivider(Modifier.padding(vertical = 6.dp), color = Promtuz.colors.divider)
+                if (gi != 0) HorizontalDivider(color = Promtuz.colors.divider)
                 group.forEach { action ->
                     val index = i
                     MenuRow(
@@ -403,6 +388,7 @@ fun MenuCard(
                 }
             }
         }
+    }
     }
 }
 
@@ -422,7 +408,7 @@ private fun MenuRow(
             .widthIn(min = 160.dp, max = 280.dp)
             .height(itemHeight)
             .background(
-                if (highlighted) Promtuz.colors.text.copy(alpha = 0.08f) else Color.Transparent
+                if (highlighted) Promtuz.colors.glassFill else Color.Transparent
             )
             .clickable(role = Role.Button, onClickLabel = action.label, onClick = onClick)
             .padding(horizontal = 16.dp),

@@ -26,6 +26,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shape
@@ -113,19 +129,10 @@ private class PressNode(private val source: InteractionSource) :
     private companion object { const val SPREAD_MS = 225; const val FADE_IN_MS = 75; const val FADE_OUT_MS = 150 }
 }
 
-/** Filled controls dim while held, the way iOS buttons do; nothing is drawn over them. */
-@Composable
-fun Modifier.pressDim(source: InteractionSource, enabled: Boolean = true): Modifier {
-    val pressed by source.collectIsPressedAsState()
-    val alpha by animateFloatAsState(if (pressed && enabled) 0.72f else 1f,
-        tween(if (pressed) 60 else 220), label = "pressDim")
-    return graphicsLayer { this.alpha = alpha }
-}
+/** Text buttons in a dialog's footer round to follow the dialog's corner. */
+val LocalTextButtonShape = androidx.compose.runtime.staticCompositionLocalOf<Shape> { RoundedCornerShape(Radii.small) }
 
-private val TextButtonShape = RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)
-
-// Material's buttons under the app's names, so every call site gets the app's press feel.
-// Ripples are switched off in PromtuzTheme; these lay PressHighlight or pressDim on instead.
+// Material's buttons under the app's names, so every call site gets the app's ripple.
 
 @Composable
 fun TextButton(
@@ -137,10 +144,24 @@ fun TextButton(
     content: @Composable RowScope.() -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
-    androidx.compose.material3.TextButton(
-        onClick, modifier.clip(TextButtonShape).indication(source, PressHighlight), enabled, TextButtonShape,
-        colors, contentPadding = contentPadding, interactionSource = source, content = content,
-    )
+    // The touch target keeps Material's 48dp; the highlight stays on the 40dp button.
+    Box(
+        modifier.minimumInteractiveComponentSize()
+            .clickable(source, null, enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            Modifier.defaultMinSize(58.dp, 40.dp).clip(LocalTextButtonShape.current).indication(source, PressHighlight)
+                .padding(contentPadding),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CompositionLocalProvider(
+                LocalContentColor provides if (enabled) colors.contentColor else colors.disabledContentColor,
+                LocalTextStyle provides MaterialTheme.typography.labelLarge,
+            ) { content() }
+        }
+    }
 }
 
 @Composable
@@ -152,8 +173,20 @@ fun IconButton(
     content: @Composable () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
-    androidx.compose.material3.IconButton(
-        onClick, modifier.clip(RoundedCornerShape(Radii.iconButton)).indication(source, PressHighlight),
-        enabled, colors, source, content = content,
-    )
+    Box(
+        modifier.minimumInteractiveComponentSize()
+            .clickable(source, null, enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier.size(40.dp).clip(CircleShape).background(if (enabled) colors.containerColor else colors.disabledContainerColor)
+                .indication(source, PressHighlight),
+            contentAlignment = Alignment.Center,
+        ) {
+            CompositionLocalProvider(
+                LocalContentColor provides if (enabled) colors.contentColor else colors.disabledContentColor,
+                content = content,
+            )
+        }
+    }
 }
