@@ -58,8 +58,10 @@ fun AppNavigation(
                         opened == null || opened != session.sessionId)
                 androidx.compose.foundation.layout.Box {
                     if (!locked) {
-                        val chatVM = koinViewModel<ChatVM>(parameters = { parametersOf(key.conversation) })
-                        LaunchedEffect(key.conversation) {
+                        // A locked chat's model wipes itself when its session ends, so each unlock gets a new one.
+                        val chatVM = koinViewModel<ChatVM>(key = "chat:${key.conversation}:${if (hidden) opened else "open"}",
+                            parameters = { parametersOf(key.conversation) })
+                        LaunchedEffect(chatVM) {
                             chatVM.init()
                         }
                         ChatScreen(key.name, chatVM)
