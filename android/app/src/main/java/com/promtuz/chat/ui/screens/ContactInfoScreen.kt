@@ -36,16 +36,9 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     }.collectAsState(null)
     val chats by app.chats.collectAsState()
     val privateIds by app.privateIds.collectAsState()
-    val privateSummary by app.privateSummary.collectAsState()
-    // A Secret chat's info is its own; anywhere else it is the normal chat's.
-    val chat = chats.firstOrNull { it.conversationHex == conversation }
-        ?: privateSummary?.takeIf { it.conversationHex == conversation }
-        ?: chats.firstOrNull { it.kind == 0 && it.peerHex == peer }
+    val chat = chats.firstOrNull { !it.isGroup && (it.conversationHex == conversation || it.peerHex == peer) }
     val hidden = chat != null && chat.conversationHex in privateIds
-    val secret = chats.firstOrNull { it.isSecret && it.peerHex == peer }
-    val canSecret = chat?.kind == 0 && chat.status == 1 && !chat.request
     var removingLock by remember { mutableStateOf(false) }
-    var starting by remember { mutableStateOf(false) }
     var clearing by remember { mutableStateOf(false) }
     val directConversation = chat?.conversationHex ?: conversation
     val picture = rememberAvatar(peer)
@@ -84,14 +77,6 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                     if (hidden) add(MenuAction("Remove lock", R.drawable.oi_lock_chat_open) { removingLock = true })
                     else add(MenuAction("Lock chat", R.drawable.oi_lock_chat) { app.navigator.push(Routes.LockChat(chat.conversationHex)) })
                 }
-                if (canSecret) add(MenuAction(if (secret != null) "Open secret chat" else "Start secret chat", iconPlaceholder = "secret") {
-                    if (secret != null) app.openChat(secret.conversationHex, secret.name)
-                    else if (!starting) {
-                        starting = true
-                        error = null
-                        app.startSecretChat(peer, name) { starting = false; error = it }
-                    }
-                })
             },
             buildList { if (chat != null && !hidden) add(MenuAction("Clear history", R.drawable.oi_broom) { clearing = true }) },
             buildList {
@@ -103,7 +88,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                     }
                 })
             },
-            buildList { if (chat != null && !chat.isSecret) add(MenuAction("Delete contact", R.drawable.oi_trash, destructive = true) { deleting = true }) },
+            buildList { if (chat != null) add(MenuAction("Delete contact", R.drawable.oi_trash, destructive = true) { deleting = true }) },
         ).filter { it.isNotEmpty() })
     }) { padding, list ->
         LazyColumn(Modifier.fillMaxSize(), list, contentPadding = padding.listPadding(top = 12.dp, bottom = 24.dp),

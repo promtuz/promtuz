@@ -16,8 +16,6 @@ use crate::state::core;
 
 pub const KIND_DIRECT: u8 = 0;
 pub const KIND_GROUP: u8 = 1;
-/// A second 1:1 with the same person on its own group, shown on both sides as Secret.
-pub const KIND_SECRET: u8 = 2;
 
 pub use crate::mls::policy::ROLE_ADMIN;
 pub use crate::mls::policy::ROLE_MEMBER;
@@ -80,45 +78,16 @@ impl Conversation {
     }
 
     fn find_direct(conn: &Connection, peer: &[u8; 32]) -> Result<Option<[u8; 16]>> {
-        Ok(Self::find_pair(conn, peer, KIND_DIRECT))
-    }
-
-    fn find_pair(conn: &Connection, peer: &[u8; 32], kind: u8) -> Option<[u8; 16]> {
-        conn.query_row(
-            "SELECT c.id FROM conversations c \
-             JOIN conversation_members m ON m.conversation_id = c.id \
-             WHERE c.kind = ?1 AND m.member_ipk = ?2 LIMIT 1",
-            (kind, peer.as_slice()),
-            |r| r.get(0),
-        )
-        .ok()
-    }
-
-    pub fn find_direct_for(peer: &[u8; 32]) -> Option<[u8; 16]> {
-        Self::find_pair(&core().db.messages().lock(), peer, KIND_DIRECT)
-    }
-
-    pub fn find_secret(peer: &[u8; 32]) -> Option<[u8; 16]> {
-        Self::find_pair(&core().db.messages().lock(), peer, KIND_SECRET)
-    }
-
-    /// One Secret chat per pair: a second Welcome rebinds the same chat.
-    pub fn secret_for_peer(peer: &[u8; 32]) -> Result<[u8; 16]> {
-        let me = Identity::local_ipk().ok_or_else(|| anyhow::anyhow!("identity not found"))?;
-        anyhow::ensure!(&me != peer, "cannot open a Secret chat with yourself");
-        let conn = core().db.messages().lock();
-        if let Some(id) = Self::find_pair(&conn, peer, KIND_SECRET) {
-            return Ok(id);
-        }
-        let id = mint_conversation_id();
-        conn.execute(
-            "INSERT INTO conversations (id, kind, title, mls_group_id, created_at, created_by) \
-             VALUES (?1, ?2, '', NULL, ?3, NULL)",
-            (id.as_slice(), KIND_SECRET, now_secs()),
-        )?;
-        Self::put_member(&conn, &id, peer, ROLE_MEMBER)?;
-        Self::put_member(&conn, &id, &me, ROLE_MEMBER)?;
-        Ok(id)
+        let found = conn
+            .query_row(
+                "SELECT c.id FROM conversations c \
+                 JOIN conversation_members m ON m.conversation_id = c.id \
+                 WHERE c.kind = ?1 AND m.member_ipk = ?2 LIMIT 1",
+                (KIND_DIRECT, peer.as_slice()),
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(found)
     }
 
     pub fn create_group(title: &str, members: &[[u8; 32]]) -> Result<[u8; 16]> {

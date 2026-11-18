@@ -21,7 +21,7 @@ pub fn hide_conversation(conversation_id: Vec<u8>, code: String) -> Result<(), C
 pub fn unlock_private_conversation(code: String, generation: u64) -> Result<Option<Vec<u8>>, CoreError> {
     let code = Zeroizing::new(code);
     let conversation = crate::privacy::unlock_at(&code, generation)?;
-    for conv in conversation.map(|c| crate::privacy::linked(&c)).transpose()?.unwrap_or_default() {
+    if let Some(conv) = conversation {
         core().spawn(async move {
             if let Err(error) = crate::mls::privacy::drain(conv).await {
                 log::warn!("PRIVATE: buffered inbox remains pending: {error:#}");

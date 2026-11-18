@@ -80,31 +80,6 @@ pub fn seal_welcome_blob(
     })
 }
 
-/// Whether a Welcome opens a Secret chat, read by staging it in an operation that always rolls back.
-/// `None` when it cannot be read, or when an operation is already open and would keep the staging.
-pub fn welcome_is_secret(provider: &PromtuzMlsProvider, envelope: &WelcomeEnvelopeP) -> Option<bool> {
-    if provider.storage().in_operation() {
-        return None;
-    }
-    let welcome = match MlsMessageIn::tls_deserialize_exact(&envelope.welcome_blob.0).ok()?.extract() {
-        MlsMessageBodyIn::Welcome(w) => w,
-        _ => return None,
-    };
-    let join_config = MlsGroupJoinConfig::builder()
-        .use_ratchet_tree_extension(true)
-        .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
-        .padding_size(super::MLS_PADDING_SIZE)
-        .build();
-    let mut secret = None;
-    let _ = provider.storage().atomic(|| -> Result<()> {
-        let staged = StagedWelcome::new_from_welcome(provider, &join_config, welcome, None)
-            .map_err(MlsGroupError::from_welcome)?;
-        secret = Some(super::group::declares_secret(staged.group_context().extensions()));
-        Err(MlsGroupError::Internal("peek only".into()))
-    });
-    secret
-}
-
 /// Verifies the envelope and joins the group. Whether to accept the sender at all is the caller's
 /// decision.
 pub fn process_welcome(
@@ -190,9 +165,6 @@ pub fn process_welcome(
             return Err(MlsGroupError::Internal(
                 "Welcome's inner credentials lack sender_ipk identity (smuggling?)".into(),
             ));
-        }
-        if is_group_chat && super::group::declares_secret(context) {
-            return Err(MlsGroupError::Internal("a Secret chat cannot be a group".into()));
         }
         if !is_group_chat && (roster != 2 || sender_ipk == recipient_ipk) {
             return Err(MlsGroupError::Internal(

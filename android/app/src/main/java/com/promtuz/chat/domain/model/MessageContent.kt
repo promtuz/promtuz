@@ -103,7 +103,7 @@ fun MessageContent.previewLine(): String = when (this) {
     is MessageContent.System, is MessageContent.Call -> ""
 }
 
-enum class SystemEventKind { Added, Left, Removed, Titled, Role, Rules, Ended }
+enum class SystemEventKind { Added, Left, Removed, Titled, Role, Rules }
 
 /**
  * [target] is a member hex for membership events, the new name for a rename,
@@ -119,7 +119,6 @@ fun systemContent(code: Int, actorHex: String?, target: String, names: Map<Strin
             3 -> SystemEventKind.Removed
             6 -> SystemEventKind.Role
             7 -> SystemEventKind.Rules
-            8 -> SystemEventKind.Ended
             else -> SystemEventKind.Titled
         },
         actor = actorHex?.let { names[it] } ?: "Someone",

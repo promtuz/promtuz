@@ -181,7 +181,6 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                 }
                 ChatBarTitle(
                     name = name,
-                    secret = summary?.isSecret == true,
                     subtitle = subtitle,
                     subtitleColor = subtitleColor,
                     animateChanges = headerReady,
@@ -257,18 +256,12 @@ internal fun ChatBarTitle(
     subtitle: String?,
     subtitleColor: Color,
     modifier: Modifier = Modifier,
-    secret: Boolean = false,
     animateChanges: Boolean = true,
     onClick: (() -> Unit)? = null,
 ) {
     Column(modifier.then(if (onClick != null) Modifier.pressScale(onClick, 0.96f) else Modifier)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMediumEmphasized,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            // [secret] placeholder until the glyph exists.
-            if (secret) Text("[secret]", style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        Text(name, style = MaterialTheme.typography.titleMediumEmphasized,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
         // Keep the queue mounted through absence. The empty target has zero height,
         // so its size transition recenters the name without interrupting a subtitle.
         val subtitleContent: @Composable (String?) -> Unit = { value ->

@@ -76,22 +76,6 @@ pub(crate) async fn send_prepared(
     }
 }
 
-/// Builds the Secret chat's group now, so the peer sees the chat before any message. Without a relay
-/// or a KeyPackage it is built on the first send instead.
-pub(crate) async fn open_secret(conversation: [u8; 16]) -> Result<()> {
-    let Some(client) = core().session().map(|s| s.dht.clone()) else { return Ok(()) };
-    let provider = PromtuzMlsProvider::shared();
-    let stash = KeyPackageStash::new(core().db.mls());
-    let buffer = EpochCatchupBuffer::new(core().db.mls());
-    let ctx = MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: client.as_ref() };
-    let our_ipk = Identity::local_ipk().ok_or_else(|| anyhow!("identity not found"))?;
-    let signer = crate::data::identity::secret_key_signing(&our_ipk)?;
-    match session::group_for_conversation(&ctx, &conversation, &our_ipk, &signer).await {
-        Err(e) if !send::awaits_keypackage(&e) => Err(e),
-        _ => Ok(()),
-    }
-}
-
 /// Editing the text field changes a caption without changing its media body.
 pub(crate) fn text_edit_body(
     conversation: &[u8; 16], target: &[u8; 16], text: String,

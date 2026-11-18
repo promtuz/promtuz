@@ -34,7 +34,6 @@ use rusqlite::params;
 use thiserror::Error;
 
 use super::group::GROUP_META_EXTENSION;
-use super::group::SECRET_EXTENSION;
 use super::group::PROMTUZ_CIPHERSUITE;
 use super::provider::PromtuzMlsProvider;
 use super::types::PromtuzMlsStorageError;
@@ -75,9 +74,9 @@ impl std::fmt::Debug for KeyPackageStash {
     }
 }
 
-/// A leaf without the group-metadata or Secret extension cannot join a group or Secret chat, so its
-/// KeyPackage must be re-minted. An undecodable KeyPackage counts as lacking them.
-fn declares_extensions(kp_bytes: &[u8]) -> bool {
+/// A leaf without the group-metadata extension cannot join a group chat, so its KeyPackage must be
+/// re-minted. An undecodable KeyPackage counts as lacking it.
+fn declares_group_meta(kp_bytes: &[u8]) -> bool {
     use openmls::prelude::KeyPackageIn;
     use openmls::prelude::ProtocolVersion;
     use openmls::prelude::tls_codec::Deserialize as _;
@@ -85,8 +84,10 @@ fn declares_extensions(kp_bytes: &[u8]) -> bool {
     let Ok(kp_in) = KeyPackageIn::tls_deserialize_exact(kp_bytes) else { return false };
     let crypto = openmls_rust_crypto::RustCrypto::default();
     let Ok(kp) = kp_in.validate(&crypto, ProtocolVersion::Mls10) else { return false };
-    let declared = kp.leaf_node().capabilities().extensions();
-    declared.contains(&GROUP_META_EXTENSION) && declared.contains(&SECRET_EXTENSION)
+    kp.leaf_node()
+        .capabilities()
+        .extensions()
+        .contains(&GROUP_META_EXTENSION)
 }
 
 impl KeyPackageStash {
@@ -126,7 +127,7 @@ impl KeyPackageStash {
                 Some(&[PROMTUZ_CIPHERSUITE]),
                 // Groups carry their metadata in a context extension, and RFC 9420 refuses to add
                 // a leaf that does not declare every extension in the context.
-                Some(&[GROUP_META_EXTENSION, SECRET_EXTENSION]),
+                Some(&[GROUP_META_EXTENSION]),
                 None, /* proposals */
                 None, /* credentials */
             ))
@@ -233,7 +234,7 @@ impl KeyPackageStash {
                     if verify_ed25519(&rec.ipk.0, &msg, &rec.owner_sig.0).is_err() {
                         return Some(kp_ref);
                     }
-                    (!declares_extensions(&rec.kp_bytes.0)).then_some(kp_ref)
+                    (!declares_group_meta(&rec.kp_bytes.0)).then_some(kp_ref)
                 })
                 .collect()
         };

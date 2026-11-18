@@ -182,8 +182,6 @@ fun HomeChatListItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    // [secret] placeholder until the glyph exists; same slot, size and tint as the others.
-                    if (chat.isSecret) Text("[secret]", style = MaterialTheme.typography.labelSmall, color = c.muted)
                     if (privateChat) DrawableIcon(
                         R.drawable.oi_lock_chat_open, size = 15.dp, desc = "Unlocked chat",
                         tint = c.muted,
@@ -382,9 +380,6 @@ fun DeleteChatDialog(
         text = {
             Text(
                 when {
-                    chat.isSecret ->
-                        "This deletes the secret chat and its messages from this device. " +
-                            "${chat.name} will see that you deleted it. This can't be undone."
                     !chat.isGroup ->
                         "Delete your chat with ${chat.name}? This removes the contact and " +
                             "all messages on this device. This can't be undone."

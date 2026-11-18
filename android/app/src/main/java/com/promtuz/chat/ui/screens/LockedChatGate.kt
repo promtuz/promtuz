@@ -34,8 +34,6 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.security.PrivateChatSession
-import com.promtuz.chat.ui.appearance.LocalChatAppearance
-import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.utils.extensions.fromHex
@@ -54,7 +52,6 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
-    val chatColors = LocalChatColors.current
     val pin = remember(conversation) { CoreBridge.privateCodeIsPin(conversation.fromHex()) }
     val chats by app.chats.collectAsState()
     val private by app.privateSummary.collectAsState()
@@ -85,7 +82,7 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
         scope.launch {
             val epoch = PrivateChatSession.generation
             val id = runCatching { CoreBridge.unlockPrivateConversation(attempt, epoch) }.getOrNull()
-            // One code also opens the Secret chat that shares its lock.
+            // Another chat's code is a valid unlock too, but it must not open this one.
             if (id != null && CoreBridge.isPrivateConversationUnlocked(conversation.fromHex()) &&
                 PrivateChatSession.arm(conversation)) {
                 Throttle.reset(context)
@@ -118,10 +115,10 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
     val keys = remember { FocusRequester() }
     LaunchedEffect(Unit) { keys.requestFocus() }
 
-    // Drawn over the wallpaper, not a Surface, so text needs its color provided.
+    // Not a Surface, so text needs its color provided.
     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
     Box(
-        Modifier.fillMaxSize().then(rememberChatWallpaper(LocalChatAppearance.current.wallpaper))
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
             .focusRequester(keys).focusable()
             .then(if (pin) Modifier.codeKeys(::type, ::erase) else Modifier),
     ) {
@@ -129,13 +126,10 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
             Row(Modifier.fillMaxWidth().padding(4.dp)) { GoBackButton() }
             Spacer(Modifier.weight(1f))
 
-            LockedAvatar(name, chat, conversation, 80.dp, opened, ring = chatColors.wallpaper, badge = chatColors.incomingBubble)
+            LockedAvatar(name, chat, conversation, 80.dp, opened)
             Spacer(Modifier.height(16.dp))
-            Row(Modifier.padding(horizontal = 32.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false))
-                if (chat?.isSecret == true) Text(" [secret]", style = MaterialTheme.typography.labelSmall)
-            }
+            Text(name, Modifier.padding(horizontal = 32.dp), style = MaterialTheme.typography.titleLarge,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(4.dp))
             val hint = when {
                 throttled && !pin -> "Too many tries. Try again in $waitSeconds ${if (waitSeconds == 1) "second" else "seconds"}"
@@ -249,15 +243,14 @@ private object Throttle {
 
 /** The chat's avatar with a lock badge; the gate and lock setup share it. */
 @Composable
-internal fun LockedAvatar(name: String, chat: com.promtuz.chat.domain.model.ChatSummary?, conversation: String, size: androidx.compose.ui.unit.Dp, opened: Boolean = false,
-    ring: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.background, badge: androidx.compose.ui.graphics.Color = Promtuz.colors.card) {
+internal fun LockedAvatar(name: String, chat: com.promtuz.chat.domain.model.ChatSummary?, conversation: String, size: androidx.compose.ui.unit.Dp, opened: Boolean = false) {
     val c = Promtuz.colors
     Box(Modifier.size(size)) {
         if (chat?.isGroup == true) GroupAvatar(name, emptyList(), size, conversation = conversation)
         else Avatar(name, size, identityKey = chat?.peerHex ?: conversation, image = rememberAvatar(chat?.peerHex))
         Box(
             Modifier.align(Alignment.BottomEnd).offset(4.dp, 4.dp).size(size * 0.375f).clip(CircleShape)
-                .background(ring).padding(3.dp).clip(CircleShape).background(badge),
+                .background(MaterialTheme.colorScheme.background).padding(3.dp).clip(CircleShape).background(c.card),
             contentAlignment = Alignment.Center,
         ) {
             Crossfade(opened, animationSpec = tween(180), label = "lock") { open ->

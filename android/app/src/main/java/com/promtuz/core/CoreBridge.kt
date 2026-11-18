@@ -217,9 +217,6 @@ object CoreBridge {
     suspend fun privateConversationUnreadCount(id: ByteArray): Int = withContext(Dispatchers.IO) {
         uniffi.core.privateConversationUnreadCount(id).toInt()
     }
-    suspend fun startSecretChat(peer: ByteArray): ByteArray =
-        withContext(Dispatchers.IO) { uniffi.core.startSecretChat(peer) }
-
     suspend fun removeConversationLock(id: ByteArray) = withContext(Dispatchers.IO) {
         uniffi.core.removeConversationLock(id)
     }
@@ -288,9 +285,6 @@ object CoreBridge {
 
     /** Local only: nobody is told. Refused while we manage a group others are still in, unless
      *  [force], the escape hatch for a group whose own state is what broke. */
-    suspend fun deleteSecretChat(conversationId: ByteArray) =
-        withContext(Dispatchers.IO) { uniffi.core.deleteSecretChat(conversationId) }
-
     suspend fun deleteConversation(conversationId: ByteArray, force: Boolean = false) =
         withContext(Dispatchers.IO) { ffiDeleteConversation(conversationId, force) }
 

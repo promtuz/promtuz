@@ -570,21 +570,6 @@ pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), 
     Ok(())
 }
 
-/// Tells the other person before deleting, so their next message starts a new Secret chat
-/// instead of going to a group that no longer exists here.
-#[uniffi::export(async_runtime = "tokio")]
-pub async fn delete_secret_chat(conversation_id: Vec<u8>) -> Result<(), CoreError> {
-    let conv = fixed::<16>(&conversation_id, "conversation id")?;
-    crate::privacy::require_access(&conv)?;
-    if Conversation::get(&conv).is_some_and(|c| c.kind == crate::data::conversation::KIND_SECRET)
-        && Conversation::group_of(&conv).is_some()
-        && let Err(e) = crate::messaging::send_control(conv, common::proto::mls_wire::AppPayload::Unpaired).await
-    {
-        log::debug!("SECRET: could not tell them the chat was deleted: {e}");
-    }
-    delete_conversation(conversation_id, true)
-}
-
 pub(crate) fn purge_mls_group(gid: &[u8; 32]) {
     if let Err(e) = crate::mls::PromtuzMlsProvider::shared().storage().forget_group(gid) {
         log::warn!("MLS: clearing group storage rows failed: {e}");
@@ -741,41 +726,6 @@ pub struct ContactDiag {
     pub last_status: Option<u8>,
     /// Pending (undelivered) outbox ops for this peer.
     pub pending_ops: u32,
-}
-
-/// One per pair: an existing Secret chat is returned as it is. It starts empty.
-#[uniffi::export(async_runtime = "tokio")]
-pub async fn start_secret_chat(peer: Vec<u8>) -> Result<Vec<u8>, CoreError> {
-    let peer = fixed::<32>(&peer, "peer")?;
-    if let Some(id) = Conversation::find_secret(&peer) {
-        return Ok(id.to_vec());
-    }
-    let start = async {
-        anyhow::ensure!(Contact::is_paired(&peer), "Secret chats need a contact who added you back.");
-        // A locked chat's Secret chat starts under the same lock, so it never sits beside it unlocked.
-        let lock = Conversation::find_direct_for(&peer).filter(crate::privacy::is_private);
-        if let Some(direct) = lock {
-            crate::privacy::require_access(&direct).map_err(|_| anyhow::anyhow!("Open your chat with them first."))?;
-        }
-        let id = Conversation::secret_for_peer(&peer)?;
-        if let Some(direct) = lock {
-            let linked = { let _configuration = core().private_configuration.lock(); crate::privacy::link(&id, &direct) };
-            if let Err(e) = linked {
-                let _ = Conversation::delete(&id);
-                return Err(e);
-            }
-        }
-        if let Err(e) = crate::messaging::open_secret(id).await {
-            let _ = Conversation::delete(&id);
-            log::warn!("SECRET: could not start with {}: {e:#}", hex::encode(&peer[..4]));
-            let unsupported = e.to_string() == crate::messaging::session::SECRET_UNSUPPORTED;
-            anyhow::bail!(if unsupported { crate::messaging::session::SECRET_UNSUPPORTED }
-                else { "Couldn’t start the secret chat. Check your connection and try again." });
-        }
-        log::info!("SECRET: started with {}", hex::encode(&peer[..4]));
-        Ok(id.to_vec())
-    };
-    start.await.map_err(CoreError::from)
 }
 
 /// Deletes all per-contact state so re-scanning their QR is a clean first-time add. Best-effort and

@@ -34,7 +34,7 @@ pub(super) fn offered_to(c: &Core, file_id: &[u8; 32], peer: &[u8; 32], me: &[u8
                          AND hd.dispatch_id = m.dispatch_id AND hd.file_id = ?1))
             AND cm.member_ipk = ?2 AND cm.active = 1 AND m.outgoing = 1
             AND m.deleted = 0
-            AND ((c.kind <> ?5 AND mine.active = 1) OR (c.kind = ?5 AND ?6))
+            AND ((c.kind = ?4 AND mine.active = 1) OR (c.kind = ?5 AND ?6))
           LIMIT 1",
         rusqlite::params![
             file_id.as_slice(),
@@ -50,7 +50,7 @@ pub(super) fn offered_to(c: &Core, file_id: &[u8; 32], peer: &[u8; 32], me: &[u8
     if ordinary {return true}
     if !crate::state::owns_stores(&c.db) {return false}
     let Ok(rows)=crate::data::media::private_file_rows_tx(&db,file_id) else{return false};
-    rows.into_iter().any(|(conv,did,_)| db.query_row("SELECT EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id JOIN conversation_members cm ON cm.conversation_id=c.id LEFT JOIN conversation_members mine ON mine.conversation_id=c.id AND mine.member_ipk=?4 WHERE m.conversation_id=?1 AND m.dispatch_id=?2 AND m.outgoing=1 AND m.deleted=0 AND cm.member_ipk=?3 AND cm.active=1 AND ((c.kind<>?6 AND mine.active=1) OR (c.kind=?6 AND ?7)))",
+    rows.into_iter().any(|(conv,did,_)| db.query_row("SELECT EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id JOIN conversation_members cm ON cm.conversation_id=c.id LEFT JOIN conversation_members mine ON mine.conversation_id=c.id AND mine.member_ipk=?4 WHERE m.conversation_id=?1 AND m.dispatch_id=?2 AND m.outgoing=1 AND m.deleted=0 AND cm.member_ipk=?3 AND cm.active=1 AND ((c.kind=?5 AND mine.active=1) OR (c.kind=?6 AND ?7)))",
         rusqlite::params![conv,did,peer,me,crate::data::conversation::KIND_GROUP,crate::data::conversation::KIND_DIRECT,paired],|r|r.get::<_,bool>(0)).unwrap_or(false))
 }
 

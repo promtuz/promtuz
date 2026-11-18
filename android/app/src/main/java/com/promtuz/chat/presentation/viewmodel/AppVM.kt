@@ -219,14 +219,6 @@ class AppVM(
             sessionId = if (hidden) com.promtuz.chat.security.PrivateChatSession.sessionId else null))
     }
 
-    /** Opens the existing Secret chat, or starts one; [onError] gets the reason it could not. */
-    fun startSecretChat(peerHex: String, name: String, onError: (String) -> Unit) =
-        viewModelScope.launch {
-            runCatching { bridge.startSecretChat(peerHex.fromHex()) }
-                .onSuccess { openChat(it.toHex(), name) }
-                .onFailure { onError(it.reason("Couldn’t start the secret chat")) }
-        }
-
     fun openChatWith(peerHex: String, name: String) = viewModelScope.launch {
         val conv = runCatching { bridge.conversationWith(peerHex.fromHex()) }.getOrNull() ?: return@launch
         openChat(conv.toHex(), name)
@@ -239,9 +231,7 @@ class AppVM(
     /** A direct chat forgets the contact too, since half-forgetting one leaves a phantom row.
      *  [onDone] runs only once the chat is really gone. */
     fun deleteChat(summary: ChatSummary, onDone: () -> Unit = {}) = viewModelScope.launch {
-        val result = if (summary.isSecret) {
-            runCatching { bridge.deleteSecretChat(summary.conversationHex.fromHex()) }
-        } else if (summary.isGroup) {
+        val result = if (summary.isGroup) {
             runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
         } else {
             summary.peerHex?.let { runCatching { bridge.forgetContact(it.fromHex()) } }

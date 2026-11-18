@@ -31,7 +31,6 @@ object BubbleTextLayouts {
             SystemEventKind.Added -> "${c.actor} added $target"
             SystemEventKind.Removed -> "${c.actor} removed $target"
             SystemEventKind.Left -> "${c.target} left"
-            SystemEventKind.Ended -> "${c.actor} deleted this secret chat"
             SystemEventKind.Titled -> "${c.actor} named the group \"${c.target}\""
             SystemEventKind.Role -> when (c.detail) {
                 "2" -> "${c.actor} made $target an owner"

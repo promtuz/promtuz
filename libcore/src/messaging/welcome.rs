@@ -35,25 +35,11 @@ pub async fn send_pair_ack(to: [u8; 32]) -> Result<()> {
 
 /// `from` deleted our direct chat and its pair group. We drop our copy of the group but keep the
 /// history; our next message starts a fresh pair, which reaches them as a request.
-pub(crate) fn unpaired(conversation: [u8; 16], from: [u8; 32], dispatch_id: [u8; 16], at: u64) {
-    let Some(kind) = Conversation::get(&conversation).map(|c| c.kind) else { return };
+pub(crate) fn unpaired(conversation: [u8; 16], from: [u8; 32]) {
+    let direct = Conversation::get(&conversation)
+        .is_some_and(|c| c.kind == crate::data::conversation::KIND_DIRECT);
     let Some(gid) = Conversation::group_of(&conversation) else { return };
-    if Conversation::peer_of(&conversation) != Some(from) {
-        return;
-    }
-    // A deleted Secret chat stays here with a note; the next message starts a new one.
-    if kind == crate::data::conversation::KIND_SECRET {
-        if let Err(e) = Conversation::unbind_group(&conversation) {
-            return warn!("SECRET: could not unbind the deleted chat's group: {e}");
-        }
-        crate::api::messaging::purge_mls_group(&gid);
-        let ended = crate::db::messages::SYSTEM_ENDED;
-        if let Err(e) = crate::data::message::Message::save_system(conversation, from, &dispatch_id, ended, "", at, false) {
-            warn!("SECRET: could not note the deletion: {e}");
-        }
-        return info!("SECRET: {} deleted our secret chat", hex::encode(&from[..4]));
-    }
-    if kind != crate::data::conversation::KIND_DIRECT {
+    if !direct || Conversation::peer_of(&conversation) != Some(from) {
         return;
     }
     match Contact::unpair(&from) {
@@ -106,7 +92,7 @@ pub(crate) async fn pair_with_consent(
         dht:      client.as_ref(),
     };
 
-    let group = lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, pairing, false).await?;
+    let group = lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, pairing).await?;
     Contact::save_pending(to, peer_name)?;
     if let Err(e) = Contact::set_mls_group_id(&to, &group.group_id()) {
         warn!("PAIR: persist mls_group_id failed: {e}");
@@ -136,12 +122,6 @@ pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<
     let gid = group.group_id();
     if let Some(id) = Conversation::for_group(&gid) {
         return Ok(id); // already homed; a redelivered Welcome mints no second one
-    }
-    if group.is_secret() {
-        let id = Conversation::secret_for_peer(from)?;
-        Conversation::bind_group(&id, &gid)?;
-        info!("MLS: {} opened a Secret chat", hex::encode(&from[..4]));
-        return Ok(id);
     }
     let Some(meta) = group.group_meta() else {
         ensure!(!group.is_group_chat(), "cannot open unsupported group rules as a direct chat");
@@ -319,13 +299,6 @@ pub(super) fn process_welcome_inbound<C: DhtClient>(
         return refuse();
     }
 
-    // A Secret chat is only for an existing contact. It never pairs and never opens a request.
-    if group.is_secret() && admitted != Admission::Known {
-        let _ = group.delete(ctx.provider);
-        warn!("MLS: dropped a Secret chat Welcome from a non-contact {}", hex::encode(&sender_ipk[..4]));
-        return Ok(false);
-    }
-
     if history.is_some() {
         let path =
             crate::mls::recovery::history(ctx.provider, &group.group_id(), group.branch_id())?;
@@ -366,8 +339,8 @@ pub(super) fn process_welcome_inbound<C: DhtClient>(
         hex::encode(&sender_ipk[..4]),
         hex::encode(&group.group_id()[..4])
     );
-    // A request waits for the user to accept it. A Secret chat proves no pair.
-    if !group.is_secret() && !crate::requests::is_request(&sender_ipk) {
+    // A request waits for the user to accept it.
+    if !crate::requests::is_request(&sender_ipk) {
         confirm_pair(sender_ipk);
     }
     Ok(true)
@@ -563,11 +536,11 @@ mod tests {
         Conversation::bind_group(&group_chat, &[0xA4; 32]).unwrap();
         let carol = [0xC1; 32];
         Contact::save(carol, "Carol".into()).unwrap();
-        unpaired(group_chat, alice.ipk, [0xD1; 16], 1);
-        unpaired(chat, carol, [0xD2; 16], 1);
+        unpaired(group_chat, alice.ipk);
+        unpaired(chat, carol);
         assert!(Contact::is_paired(&alice.ipk) && Contact::is_paired(&carol));
         assert!(Conversation::group_of(&chat).is_some());
-        unpaired(chat, alice.ipk, [0xD3; 16], 1);
+        unpaired(chat, alice.ipk);
         assert_eq!(Contact::status(&alice.ipk), Some(crate::data::contact::PAIR_STATUS_PENDING));
         assert!(Conversation::group_of(&chat).is_none());
         assert!(Conversation::group_of(&group_chat).is_some());
@@ -576,45 +549,5 @@ mod tests {
         crate::requests::block_message_request(mallory.ipk.to_vec()).await.unwrap();
         assert_eq!(Contact::status(&mallory.ipk), None);
         assert!(!admit(&mallory, welcome(&mallory, &bob, &dht, [0xE3; 32], None).await));
-    }
-
-    /// A Secret Welcome is read without consuming its KeyPackage, files a second chat beside the
-    /// normal one without touching the contact's pair group, and is refused from a non-contact.
-    #[tokio::test]
-    async fn a_secret_welcome_opens_a_second_chat_and_only_from_a_contact() {
-        let scope = ScopedCore::new();
-        let (bob, alice, mallory) = (Device::new(0xB2), Device::new(0xA5), Device::new(0xE5));
-        identity(&scope.core.db.identity().lock(), 0xB2);
-        let dht = FakeDhtClient::default();
-        for _ in 0..4 {
-            bob.publish_keypackage(&dht).await;
-        }
-        Contact::save(alice.ipk, "Alice".into()).unwrap();
-        let direct = Conversation::for_peer(&alice.ipk).unwrap();
-        Contact::set_mls_group_id(&alice.ipk, &[0xAA; 32]).unwrap();
-        async fn start(from: &Device, to: &Device, dht: &FakeDhtClient) -> WelcomeEnvelopeP {
-            let ctx = from.ctx(dht);
-            let g = lazy_create_group_paired(&ctx, &from.ipk, &from.signer, &to.ipk, None, true)
-                .await
-                .unwrap();
-            let pending = dht.welcomes_pending.lock().clone();
-            pending.into_iter().find(|w| w.envelope.group_id.0 == g.group_id()).unwrap().envelope
-        }
-        let ctx = bob.ctx(&dht);
-
-        let envelope = start(&alice, &bob, &dht).await;
-        assert_eq!(crate::mls::welcome_is_secret(&bob.provider, &envelope), Some(true));
-        let gid = envelope.group_id.0;
-        assert!(process_welcome_inbound(&ctx, alice.ipk, envelope, None).unwrap());
-        let secret = Conversation::find_secret(&alice.ipk).unwrap();
-        assert_ne!(secret, direct);
-        assert_eq!(Conversation::group_of(&secret), Some(gid));
-        assert_eq!(Conversation::for_peer(&alice.ipk).unwrap(), direct);
-        assert_eq!(Contact::get(&alice.ipk).unwrap().inner.mls_group_id, Some([0xAA; 32]));
-
-        let envelope = start(&mallory, &bob, &dht).await;
-        assert!(!process_welcome_inbound(&ctx, mallory.ipk, envelope, None).unwrap());
-        assert!(Conversation::find_secret(&mallory.ipk).is_none());
-        assert_eq!(Contact::status(&mallory.ipk), None);
     }
 }

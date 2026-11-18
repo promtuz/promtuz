@@ -48,8 +48,6 @@ pub const SYSTEM_ROLE: u8 = 6;
 /// `sender_ipk` changed a group rule; `content` is `<rule>:<0|1>`, the rule
 /// being `add`, `edit`, `send` or `appoint`.
 pub const SYSTEM_RULES: u8 = 7;
-/// `sender_ipk` deleted this Secret chat on their side.
-pub const SYSTEM_ENDED: u8 = 8;
 
 impl MessageRow {
     pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
@@ -642,7 +640,7 @@ const MIGRATION_ARRAY: &[M] = &[
     // Tells the code screen to show a keypad before anything is unlocked.
     M::up("ALTER TABLE private_conversations ADD COLUMN pin INTEGER NOT NULL DEFAULT 0;")
         .down("ALTER TABLE private_conversations DROP COLUMN pin;"),
-    // A Secret chat started beside a locked chat shares its key; the key stays wrapped under `owner`.
+    // Unused. Kept because the pushed Secret chat build ran it and a version can't be taken back.
     M::up("ALTER TABLE private_conversations ADD COLUMN owner BLOB;")
         .down("ALTER TABLE private_conversations DROP COLUMN owner;"),
 ];
@@ -686,7 +684,8 @@ mod tests {
 
     #[test]
     fn preparation_migration_keeps_history_and_refuses_to_drop_active_state() {
-        let previous = MIGRATION_ARRAY.len() - 2;
+        // Just before the preparation migration; four have been appended since.
+        let previous = MIGRATION_ARRAY.len() - 5;
         let mut conn = migrate_from(previous, |conn| {
             conn.execute("INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing,
                 timestamp, dispatch_id) VALUES (?1, ?2, ?3, 'existing', 0, 100, ?4)",

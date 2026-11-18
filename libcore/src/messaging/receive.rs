@@ -729,7 +729,7 @@ pub(crate) fn receive_application_content(
                 log::warn!("GROUP: picture rejected: {e}");
             }
         },
-        Ok(AppPayload::Unpaired) => crate::messaging::welcome::unpaired(conv, author, dispatch_id, accepted_at_secs(accepted_at_ms)),
+        Ok(AppPayload::Unpaired) => crate::messaging::welcome::unpaired(conv, author),
         Ok(AppPayload::GroupRequest(request)) => crate::groups::requested(conv, author, request),
         Ok(AppPayload::GroupInvitation { who, kp_ref, welcome, history }) => {
             crate::groups::forward_welcome(conv, author, who.0, kp_ref.0, welcome, history)?;

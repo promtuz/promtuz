@@ -23,7 +23,7 @@ use tokio::sync::Mutex as TokMutex;
 
 use super::welcome::valid_initial_pair;
 use crate::data::contact::Contact;
-use crate::data::conversation::{Conversation, KIND_DIRECT, KIND_GROUP, KIND_SECRET};
+use crate::data::conversation::Conversation;
 use crate::data::identity::Identity;
 use crate::mls::EpochCatchupBuffer;
 use crate::mls::KeyPackageStash;
@@ -100,7 +100,7 @@ pub struct MlsContext<'a, C: DhtClient> {
 pub async fn lazy_create_group<C: DhtClient>(
     ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
 ) -> Result<MlsGroupHandle> {
-    lazy_create_group_paired(ctx, our_ipk, ipk_signer, to, None, false).await
+    lazy_create_group_paired(ctx, our_ipk, ipk_signer, to, None).await
 }
 
 /// Returns the KeyPackage with the `kp_ref` naming the consumed record. The `owner_sig` re-check
@@ -151,35 +151,26 @@ pub(crate) async fn fetch_verified_keypackage<C: DhtClient>(
     Ok((kp, kp_ref))
 }
 
-pub(crate) const SECRET_UNSUPPORTED: &str = "They need to update Promtuz to use secret chats.";
-
 /// Attaches `pairing` to the Welcome so a recipient who is not yet a contact can accept it.
 pub async fn lazy_create_group_paired<C: DhtClient>(
     ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
-    pairing: Option<PairingP>, secret: bool,
+    pairing: Option<PairingP>,
 ) -> Result<MlsGroupHandle> {
     // A legacy leaf will do: a pair has nobody in it to impersonate.
     let (kp, kp_ref_used) = fetch_verified_keypackage(ctx, to, false).await?;
-    if secret && !kp.leaf_node().capabilities().extensions().contains(&crate::mls::SECRET_EXTENSION) {
-        bail!(SECRET_UNSUPPORTED);
-    }
 
     let group_id = mint_group_id(our_ipk);
-    let kind = if secret { KIND_SECRET } else { KIND_DIRECT };
-    crate::mls::privacy::prepare_outgoing_direct(ctx.provider, to, &group_id, kind)?;
+    crate::mls::privacy::prepare_outgoing_direct(ctx.provider, to, &group_id)?;
 
     let (leaf_kp, cwk) =
         build_self_credential(ipk_signer).map_err(|e| anyhow!("build credential: {e}"))?;
     leaf_kp.store(ctx.provider.storage()).map_err(|e| anyhow!("store leaf kp: {e:?}"))?;
 
-    // No meta: a pairing group is a 1:1, and that absence is exactly how
-    // the far side knows not to open a group chat for it.
-    let created = if secret {
-        MlsGroupHandle::create_secret(ctx.provider, &leaf_kp, cwk, &group_id)
-    } else {
+    let mut group =
+        // No meta: a pairing group is a 1:1, and that absence is exactly how
+        // the far side knows not to open a group chat for it.
         MlsGroupHandle::create(ctx.provider, &leaf_kp, cwk, &group_id, None)
-    };
-    let mut group = created.map_err(|e| anyhow!("create group: {e}"))?;
+            .map_err(|e| anyhow!("create group: {e}"))?;
 
     let (_commit, welcome) = group
         .add_members(ctx.provider, &leaf_kp, &[kp])
@@ -206,7 +197,6 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     // Only persisted, code-protected state crosses the network await. A lock must not leave
     // an in-memory group ratchet parked inside a suspended delivery future.
     drop(group);
-    info!("MLS: delivering Welcome for {}", hex::encode(&group_id[..4]));
     if let Err(e) = ctx.dht.deliver_welcome(&env).await {
         if let Ok(Some(mut group)) = MlsGroupHandle::load(ctx.provider, &group_id)
             && let Err(de) = group.delete(ctx.provider) {
@@ -219,7 +209,6 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
         .map_err(|e| anyhow!("reload group: {e}"))?
         .ok_or_else(|| anyhow!("group disappeared during Welcome delivery"))?;
     group.merge_pending_commit(ctx.provider).map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
-    info!("MLS: Welcome delivered for {}", hex::encode(&group_id[..4]));
 
     Ok(group)
 }
@@ -245,7 +234,7 @@ pub(super) async fn group_for_conversation<C: DhtClient>(
             Ok(Some(g)) => {
                 // A damaged pair session is replaceable without removing its
                 // conversation. A real group must use its authenticated recovery.
-                if row.kind == KIND_GROUP
+                if row.kind != crate::data::conversation::KIND_DIRECT
                     || (Conversation::peer_of(conversation).is_some_and(|peer|
                         valid_initial_pair(&g.roster(), g.is_group_chat(), our_ipk, &peer))
                         && leaf_signer_for_group(ctx.provider, &g, our_ipk).is_ok()) {
@@ -260,17 +249,11 @@ pub(super) async fn group_for_conversation<C: DhtClient>(
         }
     }
 
-    if row.kind == KIND_GROUP {
+    if row.kind == crate::data::conversation::KIND_GROUP {
         bail!("group conversation has no MLS group; it must be created explicitly");
     }
     let peer = Conversation::peer_of(conversation)
         .ok_or_else(|| anyhow!("direct conversation has no peer to pair with"))?;
-    if row.kind == KIND_SECRET {
-        // Never the contact's pair group: that stays the normal chat's.
-        let group = lazy_create_group_paired(ctx, our_ipk, ipk_signer, &peer, None, true).await?;
-        Conversation::bind_group(conversation, &group.group_id())?;
-        return Ok(group);
-    }
 
     let group = lazy_create_group(ctx, our_ipk, ipk_signer, &peer).await?;
     Conversation::bind_group(conversation, &group.group_id())?;

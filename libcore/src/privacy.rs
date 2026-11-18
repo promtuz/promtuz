@@ -266,51 +266,18 @@ pub(crate) fn unlock_at(code: &str, generation: u64) -> Result<Option<[u8; 16]>>
     }
     let mut keys = Derived::new();
     let Some((conv, private, salt)) = search(code, &mut keys)? else { return Ok(None) };
-    let opened = linked(&conv)?;
     {
         let mut sessions = core().private_sessions.write();
         ensure!(
             generation == core().private_generation.load(std::sync::atomic::Ordering::SeqCst),
             "Unlock cancelled"
         );
-        for chat in &opened {
-            sessions.insert(*chat, Zeroizing::new(private.to_vec()));
-        }
+        sessions.insert(conv, Zeroizing::new(private.to_vec()));
     }
     if let Err(error) = rewrap(&conv, &private, &salt, code, &mut keys) {
         log::warn!("PRIVATE: key stays under its own salt: {error:#}");
     }
     Ok(Some(conv))
-}
-/// Every chat one code opens: a lock and the Secret chats that share its key.
-pub(crate) fn linked(conv: &[u8; 16]) -> Result<Vec<[u8; 16]>> {
-    Ok(crate::db::all(
-        &core().db.messages().lock(),
-        "SELECT conversation_id FROM private_conversations
-         WHERE public_key=(SELECT public_key FROM private_conversations WHERE conversation_id=?1)",
-        [conv],
-        |r| r.get(0),
-    )?)
-}
-/// Puts the new, empty `conv` under `owner`'s lock. Needs no code: incoming traffic is sealed to
-/// the public key, and an open session for `owner` opens `conv` too. Caller holds the configuration lock.
-pub(crate) fn link(conv: &[u8; 16], owner: &[u8; 16]) -> Result<()> {
-    {
-        let conn = core().db.messages().lock();
-        let changed = conn.execute(
-            "INSERT INTO private_conversations(conversation_id,salt,public_key,wrapped_key,owner,pin)
-             SELECT ?1,salt,public_key,wrapped_key,coalesce(owner,conversation_id),pin FROM private_conversations
-             WHERE conversation_id=?2",
-            [conv, owner],
-        )?;
-        ensure!(changed == 1, "Chat is not locked");
-        conn.execute("UPDATE conversations SET muted=1,pinned=0 WHERE id=?1", [conv])?;
-    }
-    let mut sessions = core().private_sessions.write();
-    if let Some(private) = sessions.get(owner).cloned() {
-        sessions.insert(*conv, private);
-    }
-    Ok(())
 }
 fn valid(code: &str) -> bool {
     code.chars().count() >= 6 && code.len() <= 256
@@ -354,18 +321,18 @@ fn shared_salt() -> Result<Vec<u8>> {
     Ok(salt.to_vec())
 }
 fn search(code: &str, keys: &mut Derived) -> Result<Option<([u8; 16], Zeroizing<Vec<u8>>, Vec<u8>)>> {
-    let rows: Vec<([u8; 16], Vec<u8>, Vec<u8>, [u8; 16])> = crate::db::all(
+    let rows: Vec<([u8; 16], Vec<u8>, Vec<u8>)> = crate::db::all(
         &core().db.messages().lock(),
-        "SELECT conversation_id,salt,wrapped_key,coalesce(owner,conversation_id) FROM private_conversations",
+        "SELECT conversation_id,salt,wrapped_key FROM private_conversations",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    for (conv, salt, wrapped, aad) in rows {
+    for (conv, salt, wrapped) in rows {
         ensure!(wrapped.len() >= 40, "invalid private key record");
         let key = keys.get(code, &salt)?;
         if let Ok(private) = XChaCha20Poly1305::new((&*key).into()).decrypt(
             XNonce::from_slice(&wrapped[..24]),
-            Payload { msg: &wrapped[24..], aad: &aad },
+            Payload { msg: &wrapped[24..], aad: &conv },
         ) {
             return Ok(Some((conv, Zeroizing::new(private), salt)));
         }
@@ -387,23 +354,16 @@ fn rewrap(conv: &[u8; 16], private: &[u8], salt: &[u8], code: &str, keys: &mut D
         return Ok(());
     }
     let key = keys.get(code, &shared)?;
-    for chat in linked(conv)? {
-        let aad: [u8; 16] = core().db.messages().lock().query_row(
-            "SELECT coalesce(owner,conversation_id) FROM private_conversations WHERE conversation_id=?1",
-            [chat],
-            |r| r.get(0),
+    let wrapped = wrap(&key, conv, private)?;
+    let changed = core().db.messages().lock().execute(
+        "UPDATE private_conversations SET salt=?2,wrapped_key=?3 WHERE conversation_id=?1 AND salt=?4",
+        rusqlite::params![conv, shared, wrapped, salt],
+    )?;
+    if changed == 1 {
+        core().db.mls().lock().execute(
+            "UPDATE mls_private_conversations SET salt=?2,wrapped_key=?3 WHERE conversation_id=?1",
+            rusqlite::params![conv, shared, wrapped],
         )?;
-        let wrapped = wrap(&key, &aad, private)?;
-        let changed = core().db.messages().lock().execute(
-            "UPDATE private_conversations SET salt=?2,wrapped_key=?3 WHERE conversation_id=?1 AND salt=?4",
-            rusqlite::params![chat, shared, wrapped, salt],
-        )?;
-        if changed == 1 {
-            core().db.mls().lock().execute(
-                "UPDATE mls_private_conversations SET salt=?2,wrapped_key=?3 WHERE conversation_id=?1",
-                rusqlite::params![chat, shared, wrapped],
-            )?;
-        }
     }
     Ok(())
 }
