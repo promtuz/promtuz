@@ -237,6 +237,18 @@ pub(crate) fn prepare_direct_envelope(
               AND NOT EXISTS(SELECT 1 FROM conversations other WHERE other.mls_group_id=?2 AND other.id<>c.id)",
             params![sender,gid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
     };
+    // A sealed hidden chat has no roster row; its marker recognizes the person instead.
+    let private = match private {
+        Some(found) => Some(found),
+        None => match crate::hidden::concealed_sender(sender) {
+            Some((_, conv)) => core().db.messages().lock().query_row(
+                "SELECT p.conversation_id,p.public_key,p.salt,p.wrapped_key FROM private_conversations p
+                WHERE p.conversation_id=?1
+                  AND NOT EXISTS(SELECT 1 FROM conversations other WHERE other.mls_group_id=?2 AND other.id<>?1)",
+                params![conv, gid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?,
+            None => None,
+        },
+    };
     if let Some((conv, public, salt, wrapped)) = private {
         // A relay must not be able to invent replacement private sessions. Authenticate the
         // public envelope before installing metadata or doing an expensive database rewrite.
@@ -296,6 +308,8 @@ pub(crate) fn prepare_outgoing_direct(
         )
         .optional()?
     };
+    // Someone hidden is unreachable from any other chat until their own chat is unlocked.
+    ensure!(private.is_some() || crate::hidden::concealed_sender(peer).is_none(), "peer is unreachable");
     if let Some((conv, public, salt, wrapped)) = private {
         let _operation = super::recovery::operation_lock(gid).lock();
         ensure!(core().private_sessions.read().contains_key(&conv), "Chat is locked");
@@ -314,11 +328,16 @@ pub(crate) fn maybe_buffer(
     if !provider.storage().with_conn(|conn| metadata(conn, &gid, false))?.is_some() {
         return Ok(false);
     }
+    let concealed = crate::hidden::concealed_sender(sender);
     let _operation = super::recovery::operation_lock(&gid).lock();
     provider.storage().with_tx(|conn| {
         let Some((conv,public))=metadata(conn,&gid,false)? else{return Ok(false)};
         if core().private_sessions.read().contains_key(&conv) {return Ok(false)}
-        let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mls_private_inbox WHERE group_id=?1 AND sender=?2 AND dispatch_id=?3)",params![gid,sender,id],|r|r.get(0))?;
+        let (key,hidden)=match &concealed {
+            Some((marker,c)) if *c==conv => (*marker,true),
+            _ => (*sender,false),
+        };
+        let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mls_private_inbox WHERE group_id=?1 AND sender=?2 AND dispatch_id=?3)",params![gid,key,id],|r|r.get(0))?;
         if exists{return Ok(true)}
         let (count,bytes):(u64,u64)=conn.query_row("SELECT count(*),coalesce(sum(length(envelope)),0) FROM mls_private_inbox WHERE group_id=?1",[gid],|r|Ok((r.get(0)?,r.get(1)?)))?;
         if count>=4096 || bytes.saturating_add(payload.len() as u64)>64*1024*1024 {
@@ -326,8 +345,11 @@ pub(crate) fn maybe_buffer(
         }
         // A replacement Welcome may still have an unconsumed, ordinary KeyPackage. Wrap the
         // entire envelope in the code boundary as well, so that package cannot bypass the code.
-        let protected=crate::privacy::seal_with_public(&conv,&public,payload)?;
-        conn.execute("INSERT INTO mls_private_inbox(group_id,sender,dispatch_id,accepted_at_ms,envelope) VALUES(?1,?2,?3,?4,?5)",params![gid,sender,id,accepted,protected])?;
+        let mut protected=crate::privacy::seal_with_public(&conv,&public,payload)?;
+        if hidden {
+            protected=crate::privacy::seal_with_public(&conv,&public,&postcard::to_allocvec(&(sender,protected))?)?;
+        }
+        conn.execute("INSERT INTO mls_private_inbox(group_id,sender,dispatch_id,accepted_at_ms,envelope,hidden) VALUES(?1,?2,?3,?4,?5,?6)",params![gid,key,id,accepted,protected,hidden])?;
         Ok(true)
     })
 }
@@ -364,13 +386,22 @@ async fn drain_generation<C: crate::quic::dht_client::DhtClient>(
         generation==core().private_generation.load(std::sync::atomic::Ordering::SeqCst)
             && sessions.contains_key(&conv)
     };
-    let rows=provider.storage().with_conn(|conn| -> Result<Vec<(i64,[u8;32],[u8;16],u64,Vec<u8>)>> {
-        Ok(crate::db::all(conn,"SELECT i.rowid,i.sender,i.dispatch_id,i.accepted_at_ms,i.envelope FROM mls_private_inbox i JOIN mls_private_conversations p ON p.group_id=i.group_id WHERE p.conversation_id=?1 ORDER BY i.rowid",[conv],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?)
+    let rows=provider.storage().with_conn(|conn| -> Result<Vec<(i64,[u8;32],[u8;16],u64,Vec<u8>,bool)>> {
+        Ok(crate::db::all(conn,"SELECT i.rowid,i.sender,i.dispatch_id,i.accepted_at_ms,i.envelope,i.hidden FROM mls_private_inbox i JOIN mls_private_conversations p ON p.group_id=i.group_id WHERE p.conversation_id=?1 ORDER BY i.rowid",[conv],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?)
     })?;
-    for (row, sender, id, accepted, payload) in rows {
+    for (row, sender, id, accepted, payload, hidden) in rows {
         if !current() {
             break;
         }
+        let (sender, payload) = if hidden {
+            match crate::privacy::open_bytes(&conv, &payload) {
+                Ok(inner) => postcard::from_bytes::<([u8; 32], Vec<u8>)>(&inner)?,
+                Err(_) if !current() => break,
+                Err(error) => return Err(error),
+            }
+        } else {
+            (sender, payload)
+        };
         let payload = match crate::privacy::open_bytes(&conv, &payload) {
             Ok(payload) => zeroize::Zeroizing::new(payload),
             Err(_) if !current() => break,
@@ -437,7 +468,7 @@ mod tests {
             db.execute("INSERT INTO mls_join_history VALUES(?1,?2,?3)",params![gid,[114u8;32],b"historical joined group metadata".as_slice()]).unwrap();
             db.execute("INSERT INTO mls_group_received(group_id,branch,sender,dispatch_id,accepted_at_ms,payload) VALUES(?1,?2,?3,?4,0,?5)",params![gid,branch,[114u8;32],[115u8;16],b"old-journal-message".as_slice()]).unwrap();
         }
-        crate::privacy::hide(&conv, "transport-secret").unwrap();
+        crate::privacy::lock(&conv, "transport-secret").unwrap();
         let provider = PromtuzMlsProvider::shared();
         {
             let db = mls.lock();
@@ -539,6 +570,65 @@ mod transport_tests {
     };
 
     #[tokio::test]
+    async fn a_hidden_chat_buffers_real_traffic_and_a_rebind_without_naming_the_sender() {
+        let scope = ScopedCore::new();
+        let signer = identity(&scope.core.db.identity().lock(), 131);
+        let ipk = signer.verifying_key().to_bytes();
+        let bob = Device::new(132);
+        let dht = FakeDhtClient::default();
+        Contact::save(bob.ipk, "Bob".into()).unwrap();
+        let conv = Conversation::for_peer(&bob.ipk).unwrap();
+        let provider = super::super::PromtuzMlsProvider::shared();
+        let stash = super::super::KeyPackageStash::new(scope.core.db.mls());
+        let buffer = super::super::EpochCatchupBuffer::new(scope.core.db.mls());
+        let ctx = MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
+        bob.publish_keypackage(&dht).await;
+        let group = lazy_create_group(&ctx, &ipk, &signer, &bob.ipk).await.unwrap();
+        let gid = group.group_id();
+        drop(group);
+        Conversation::bind_group(&conv, &gid).unwrap();
+        let welcome = dht.welcomes_pending.lock().pop().unwrap();
+        let mut remote = crate::mls::process_welcome(&bob.provider, &welcome.envelope).unwrap();
+        crate::api::privacy::hide_conversation(conv.to_vec(), Some("hidden-transport".into())).unwrap();
+        crate::api::privacy::lock_private_conversations();
+        let leaf = leaf_signer_for_group(&bob.provider, &remote, &bob.ipk).unwrap();
+        let payload = AppPayload::Post { reply_to: None, body: Body::Text("hidden secret".into()) }.ser().unwrap();
+        let bytes = seal_application_message(&bob.provider, &mut remote, &leaf, &payload)
+            .unwrap()
+            .address_to(&ipk, &bob.signer)
+            .unwrap();
+        process_inbound_envelope(&ctx, bob.ipk, &bytes, 1000, [133; 16]).await.unwrap();
+        let named = |scope: &ScopedCore| -> u32 {
+            scope.core.db.mls().lock().query_row("SELECT count(*) FROM mls_private_inbox WHERE sender=?1", [bob.ipk], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(named(&scope), 0);
+        assert!(!Contact::exists(&bob.ipk));
+
+        // Bob starts over from his side: the Welcome is filed into the vault, not a request.
+        use crate::quic::dht_client::DhtClient;
+        dht.publish_keypackages(&[stash.generate_one(&provider, &signer).unwrap()]).await.unwrap();
+        let next = lazy_create_group(&bob.ctx(&dht), &bob.ipk, &bob.signer, &ipk).await.unwrap();
+        let next_gid = next.group_id();
+        drop(next);
+        let welcome = dht.welcomes_pending.lock().pop().unwrap();
+        let bytes = common::proto::mls_wire::MlsEnvelopeP::Welcome(welcome.envelope).ser().unwrap();
+        process_inbound_envelope(&ctx, bob.ipk, &bytes, 2000, [134; 16]).await.unwrap();
+        assert_eq!(named(&scope), 0);
+        assert!(!Contact::exists(&bob.ipk));
+        assert!(crate::api::messaging::list_conversations().iter().all(|c| c.id != conv));
+
+        crate::privacy::unlock("hidden-transport").unwrap();
+        drain_with(&ctx, conv).await.unwrap();
+        let rows = Message::get_messages(&conv, 100, "");
+        assert_eq!(rows[0].content, "hidden secret");
+        assert_eq!(rows[0].sender_ipk, Some(bob.ipk.to_vec()));
+        assert_eq!(Conversation::group_of(&conv), Some(next_gid));
+        assert!(Contact::exists(&bob.ipk));
+        crate::api::privacy::lock_private_conversations();
+        assert!(!Contact::exists(&bob.ipk));
+    }
+
+    #[tokio::test]
     async fn private_real_transport_buffers_then_decrypts_and_relocks() {
         let scope = ScopedCore::new();
         let signer = identity(&scope.core.db.identity().lock(), 121);
@@ -558,7 +648,7 @@ mod transport_tests {
         Conversation::bind_group(&conv, &gid).unwrap();
         let welcome = dht.welcomes_pending.lock().pop().unwrap();
         let mut remote = crate::mls::process_welcome(&bob.provider, &welcome.envelope).unwrap();
-        crate::api::privacy::hide_conversation(conv.to_vec(), "transport-code".into()).unwrap();
+        crate::api::privacy::lock_conversation(conv.to_vec(), "transport-code".into()).unwrap();
         let leaf = leaf_signer_for_group(&bob.provider, &remote, &bob.ipk).unwrap();
         let payload =
             AppPayload::Post { reply_to: None, body: Body::Text("buffered real secret".into()) }
@@ -718,7 +808,7 @@ mod group_transport_tests {
         let dht=FakeDhtClient::default();
         let ctx=MlsContext{provider:&local.provider,stash:&stash,buffer:&buffer,dht:&dht};
         Message::save_incoming(conv,remote.ipk,&[144;16],"before locking",1,None).unwrap();
-        crate::api::privacy::hide_conversation(conv.to_vec(),"signed-group-code".into()).unwrap();
+        crate::api::privacy::lock_conversation(conv.to_vec(),"signed-group-code".into()).unwrap();
         assert!(MlsGroupHandle::load(&local.provider,&gid).is_err());
         assert!(journal::history(&local.provider,&gid,remote.group(&gid).branch_id()).is_err());
         let first=post(&remote,gid,&ipk,[145;16],"arrived while locked");

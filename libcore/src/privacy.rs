@@ -94,7 +94,7 @@ pub(crate) fn open_text_if_sealed(conv: &[u8; 16], text: String) -> Result<Strin
 pub(crate) fn ids_tx(conn: &Connection) -> Result<Vec<[u8; 16]>> {
     Ok(crate::db::all(conn, "SELECT conversation_id FROM private_conversations", [], |r| r.get(0))?)
 }
-pub(crate) fn hide(conv: &[u8; 16], code: &str) -> Result<()> {
+pub(crate) fn lock(conv: &[u8; 16], code: &str) -> Result<()> {
     let _configuration = core().private_configuration.lock();
     let group = crate::data::conversation::Conversation::group_of(conv);
     let _operation = group.as_ref().map(|gid| crate::mls::recovery::operation_lock(gid).lock());
@@ -120,13 +120,14 @@ pub(crate) fn hide(conv: &[u8; 16], code: &str) -> Result<()> {
     );
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO private_conversations(conversation_id,salt,public_key,wrapped_key,pin) VALUES(?1,?2,?3,?4,?5)",
+        "INSERT INTO private_conversations(conversation_id,salt,public_key,wrapped_key,pin,locked_at) VALUES(?1,?2,?3,?4,?5,?6)",
         rusqlite::params![
             conv,
             salt.as_slice(),
             pair.public_key().as_slice(),
             &wrapped,
-            is_pin(code)
+            is_pin(code),
+            common::utils::now_secs()
         ],
     )?;
     let messages: Vec<(String, String, Option<String>)> = crate::db::all(
@@ -186,7 +187,7 @@ pub(crate) fn hide(conv: &[u8; 16], code: &str) -> Result<()> {
     }
     Ok(())
 }
-/// Turns a lock off for good: unseals everything `hide` sealed, using the open session's key.
+/// Turns a lock off for good: unseals everything `lock` sealed, using the open session's key.
 pub(crate) fn remove_lock(conv: &[u8; 16]) -> Result<()> {
     let _configuration = core().private_configuration.lock();
     let group = crate::data::conversation::Conversation::group_of(conv);
@@ -281,6 +282,9 @@ pub(crate) fn unlock_at(code: &str, generation: u64) -> Result<Option<[u8; 16]>>
     }
     if let Err(error) = rewrap(&conv, &private, &salt, code, &mut keys) {
         log::warn!("PRIVATE: key stays under its own salt: {error:#}");
+    }
+    if let Err(error) = crate::hidden::open(&conv) {
+        log::warn!("HIDDEN: the person stays sealed until the next unlock: {error:#}");
     }
     Ok(Some(conv))
 }
@@ -393,7 +397,7 @@ mod tests {
             .unwrap();
         Message::save_incoming(conv, [82; 32], &[1; 16], "old secret", 1, None).unwrap();
         Reaction::apply(&conv, &[1; 16], &[82; 32], "heart", true, 2);
-        hide(&conv, "a secret code").unwrap();
+        lock(&conv, "a secret code").unwrap();
         assert!(crate::api::messaging::get_messages(conv.to_vec(), 100, "".into()).is_err());
         let raw: String = scope
             .core
@@ -454,8 +458,8 @@ mod tests {
                 .execute("INSERT INTO conversations(id) VALUES(?1)", [conv])
                 .unwrap();
         }
-        hide(&first, "unique-code").unwrap();
-        assert!(hide(&second, "unique-code").is_err());
+        lock(&first, "unique-code").unwrap();
+        assert!(lock(&second, "unique-code").is_err());
         assert!(core().private_sessions.read().is_empty());
         assert!(!is_private(&second));
         let old = core().private_generation.load(std::sync::atomic::Ordering::SeqCst);
@@ -471,7 +475,7 @@ mod tests {
         let db = scope.core.db.messages();
         db.lock().execute("INSERT INTO conversations(id) VALUES(?1)", [conv]).unwrap();
         Message::save_incoming(conv, [78; 32], &[6; 16], "before the move", 1, None).unwrap();
-        hide(&conv, "legacy-code").unwrap();
+        lock(&conv, "legacy-code").unwrap();
         let salt = || db.lock().query_row("SELECT salt FROM private_conversations", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
         let legacy = salt();
         crate::data::app_prefs::set_tx(&db.lock(), SALT_PREF, &hex::encode([9u8; 16])).unwrap();
@@ -496,7 +500,7 @@ mod tests {
         Message::save_incoming(conv, peer, &did, "kept history", 1, None).unwrap();
         Reaction::apply(&conv, &did, &peer, "heart", true, 2);
         db.lock().execute("INSERT INTO message_media(conversation_id,dispatch_id,kind,mime,name,file_id) VALUES(?1,?2,2,'text/plain','notes.txt',?3)", rusqlite::params![conv, did, [8u8; 32]]).unwrap();
-        hide(&conv, "remove-me-code").unwrap();
+        lock(&conv, "remove-me-code").unwrap();
         assert!(remove_lock(&conv).is_err(), "removing needs the open session");
         assert_eq!(unlock("remove-me-code").unwrap(), Some(conv));
         Reaction::apply(&conv, &did, &peer, "fire", true, 3);
@@ -546,7 +550,7 @@ mod tests {
             "INSERT INTO conversations(id,mls_group_id) VALUES(?1,?2)",
             rusqlite::params![conv,gid],
         ).unwrap();
-        hide(&conv,"repair-race-code").unwrap();
+        lock(&conv,"repair-race-code").unwrap();
         // Hold the operation after the repair snapshots metadata. Its configuration mutex
         // must remain held across that wait, otherwise reset could erase the code first.
         let operation = crate::mls::recovery::operation_lock(&gid).lock();
@@ -595,7 +599,7 @@ mod tests {
         let mls = scope.core.db.mls();
         mls.lock().execute("INSERT INTO mls_storage VALUES(?1,10,X'',?2)", rusqlite::params![key,b"old group secret".as_slice()]).unwrap();
         Message::save_incoming(conv, peer, &[5; 16], "group history", 1, None).unwrap();
-        hide_conversation(conv.to_vec(), "group-reset-code".into()).unwrap();
+        lock_conversation(conv.to_vec(), "group-reset-code".into()).unwrap();
         assert!(crate::api::messaging::list_conversations().iter().any(|c| c.id == conv && c.locked));
         assert!(crate::api::messaging::get_messages(conv.to_vec(), 100, "".into()).is_err());
         assert_eq!(unlock("group-reset-code").unwrap(), Some(conv));
@@ -634,7 +638,7 @@ mod tests {
         Message::save_incoming(conv, [84; 32], &[3; 16], "keep readable", 1, None).unwrap();
         scope.core.db.messages().lock().execute("INSERT INTO message_media(conversation_id,dispatch_id,kind,mime,name,file_id) VALUES(?1,?2,2,'text/plain','secret.txt',?3)",rusqlite::params![conv,[3u8;16],[4u8;32]]).unwrap();
         scope.core.db.messages().lock().execute_batch("CREATE TRIGGER refuse_media_conversion BEFORE INSERT ON message_media BEGIN SELECT RAISE(ABORT,'injected media storage failure'); END").unwrap();
-        assert!(hide(&conv, "a secret code").is_err());
+        assert!(lock(&conv, "a secret code").is_err());
         assert!(!is_private(&conv));
         assert_eq!(Message::get_messages(&conv, 100, "")[0].content, "keep readable");
     }

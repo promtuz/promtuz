@@ -39,6 +39,7 @@ data class ChatSummary(
     val request: Boolean = false,
     /** Opens only with its code; carries no preview. */
     val locked: Boolean = false,
+    val hidden: Boolean = false,
 ) {
     val isGroup: Boolean get() = kind == 1
 }

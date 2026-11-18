@@ -492,7 +492,7 @@ mod tests {
         receive_tx(&mut db,conv,members[0],members[1],offer.clone(),now).unwrap();
         let grant = db.query_row("SELECT * FROM attachment_sharing",[],Grant::from_row).unwrap();
         post(&db,&grant); drop(db);
-        crate::privacy::hide(&conv,"helper-code").unwrap();
+        crate::privacy::lock(&conv,"helper-code").unwrap();
         let (file,size,bytes): (Vec<u8>,u64,Vec<u8>) = scope.core.db.messages().lock().query_row(
             "SELECT file_id,size,recipients FROM attachment_sharing",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
         assert_eq!(file,vec![0;32]); assert_eq!(size,0); assert!(bytes.starts_with(b"pz-private-v1:"));

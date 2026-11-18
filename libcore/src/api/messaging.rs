@@ -107,6 +107,7 @@ pub struct ConversationRecord {
     pub request:        bool,
     /// Opens only with its code; carries no preview.
     pub locked:         bool,
+    pub hidden:         bool,
 }
 
 /// What members who aren't admins may do in a group.
@@ -566,7 +567,7 @@ fn mark_albums(conversation: &[u8; 16], rows: &mut [MessageRecord]) {
 pub fn list_conversations() -> Vec<ConversationRecord> {
     Conversation::list()
         .into_iter()
-        .filter(|c| !crate::groups::delete_pending(&c.id))
+        .filter(|c| !crate::groups::delete_pending(&c.id) && !crate::hidden::is_concealed(&c.id))
         .map(conversation_record)
         .collect()
 }
@@ -616,6 +617,7 @@ fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationR
         kind:           c.kind,
         request:        !is_group && crate::requests::is_request_chat(&c.id),
         locked:         crate::privacy::is_private(&c.id),
+        hidden:         crate::hidden::is_hidden(&c.id),
         title:          c.title,
         created_at:     c.created_at,
     }
@@ -781,7 +783,11 @@ pub fn set_conversation_title(conversation_id: Vec<u8>, title: String) -> Result
 /// The latest message of each conversation.
 #[uniffi::export]
 pub fn get_conversations() -> Vec<MessageRecord> {
-    Message::get_conversations().into_iter().map(with_media_kind).collect()
+    Message::get_conversations()
+        .into_iter()
+        .filter(|m| !crate::hidden::is_concealed(&m.conversation_id))
+        .map(with_media_kind)
+        .collect()
 }
 
 fn with_media_kind(row: MessageRow) -> MessageRecord {

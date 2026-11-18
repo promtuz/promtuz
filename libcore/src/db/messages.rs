@@ -648,6 +648,18 @@ const MIGRATION_ARRAY: &[M] = &[
         WHEN NEW.deleted=1 AND NEW.forwarded_from IS NOT NULL BEGIN
         UPDATE messages SET forwarded_from=NULL WHERE id=NEW.id;
     END;").down("DROP TRIGGER message_forward_tombstone; ALTER TABLE messages DROP COLUMN forwarded_from;"),
+    // A hidden chat's person lives in `vault` while it is locked. `marker` recognizes them again.
+    // `locked_at` tells chats apart where a tag or name is all the reset list shows.
+    M::up("ALTER TABLE private_conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE private_conversations ADD COLUMN vault BLOB;
+        ALTER TABLE private_conversations ADD COLUMN marker BLOB;
+        ALTER TABLE private_conversations ADD COLUMN tag TEXT;
+        ALTER TABLE private_conversations ADD COLUMN locked_at INTEGER;")
+        .down("CREATE TEMP TABLE hidden_rollback_guard (n INTEGER CHECK(n=0));
+        INSERT INTO hidden_rollback_guard SELECT count(*) FROM private_conversations WHERE hidden=1;
+        DROP TABLE hidden_rollback_guard;
+        ALTER TABLE private_conversations DROP COLUMN locked_at; ALTER TABLE private_conversations DROP COLUMN tag; ALTER TABLE private_conversations DROP COLUMN marker;
+        ALTER TABLE private_conversations DROP COLUMN vault; ALTER TABLE private_conversations DROP COLUMN hidden;"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -689,8 +701,8 @@ mod tests {
 
     #[test]
     fn preparation_migration_keeps_history_and_refuses_to_drop_active_state() {
-        // Just before the preparation migration; five have been appended since.
-        let previous = MIGRATION_ARRAY.len() - 6;
+        // Just before the preparation migration; six have been appended since.
+        let previous = MIGRATION_ARRAY.len() - 7;
         let mut conn = migrate_from(previous, |conn| {
             conn.execute("INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing,
                 timestamp, dispatch_id) VALUES (?1, ?2, ?3, 'existing', 0, 100, ?4)",

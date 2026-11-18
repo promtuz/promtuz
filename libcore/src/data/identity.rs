@@ -272,6 +272,14 @@ impl IdentitySigner {
     }
 }
 
+/// X25519 between our identity and `peer`, so both sides derive the same value and nobody else can.
+pub(crate) fn shared_with(peer: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
+    let secret = Identity::secret_key_with_manager()?;
+    let ours = SigningKey::from_bytes(&secret).to_scalar_bytes();
+    let theirs = ed25519_dalek::VerifyingKey::from_bytes(peer)?.to_montgomery();
+    Ok(Zeroizing::new(theirs.mul_clamped(ours).to_bytes()))
+}
+
 /// The only bare `SigningKey` outside `data`, for sends that sign many times; drop it promptly.
 /// `expected_ipk` stops a caller with stale identity state from signing with another secret.
 pub(crate) fn secret_key_signing(expected_ipk: &[u8; 32]) -> Result<SigningKey> {

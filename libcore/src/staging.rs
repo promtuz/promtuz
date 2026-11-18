@@ -419,7 +419,7 @@ mod tests {
     async fn stale_private_work_cannot_publish_after_lock_or_a_later_unlock() {
         let scope = ScopedCore::new(); let conv = [67;16];
         scope.core.db.messages().lock().execute("INSERT INTO conversations(id) VALUES(?1)",[conv]).unwrap();
-        crate::privacy::hide(&conv,"staging-code").unwrap(); crate::privacy::unlock("staging-code").unwrap();
+        crate::privacy::lock(&conv,"staging-code").unwrap(); crate::privacy::unlock("staging-code").unwrap();
         let generation = scope.core.private_generation.load(Ordering::SeqCst);
         let image = || crate::media::image::PreparedImage { bytes: b"private pixels".to_vec(), width:1,height:1,animated:false,animation_fallback:false };
         let id = stage_prepared_image(image(),Some((conv,generation))).unwrap();

@@ -87,6 +87,7 @@ pub(crate) async fn process_deliver<C: DhtClient>(our_ipk: VerifyingKey, msg: De
     if !is_welcome_envelope(&msg.payload)
         && !Contact::exists(&msg.from)
         && !Conversation::shares_a_chat_with(&msg.from)
+        && crate::hidden::concealed_sender(&msg.from).is_none()
     {
         info!("MESSAGE: dropped envelope from unknown sender {}", hex::encode(&msg.from[..4]));
         return Ok(());

@@ -168,7 +168,8 @@ fn next<T: DeserializeOwned + Default>(rest: &mut &[u8], what: &str) -> Result<T
 
 pub fn export() -> Result<Vec<u8>> {
     let secret = Identity::secret_key_with_manager()?;
-    export_from(&core().db, &backup_key(&secret))
+    // A hidden person never leaves the device in the clear, even from an open session.
+    crate::hidden::sealed_during(|| export_from(&core().db, &backup_key(&secret)))
 }
 
 /// Takes one database lock at a time; messages.db is read under one lock, as one snapshot.
@@ -346,7 +347,7 @@ mod tests {
         Contact::save(peer,"Keep this contact".into()).unwrap();
         let conv=Conversation::for_peer(&peer).unwrap();
         Message::save_incoming(conv,peer,&[79;16],"code-only backup history",1,None).unwrap();
-        crate::privacy::hide(&conv,"backup passphrase").unwrap();
+        crate::privacy::lock(&conv,"backup passphrase").unwrap();
         crate::privacy::unlock("backup passphrase").unwrap();
         let key=[80u8;32];
         let blob=export_from(&source.core.db,&key).unwrap();

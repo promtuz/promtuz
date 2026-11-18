@@ -58,6 +58,7 @@ fn init_inner(
 
     let core = core();
     core.secure_store.set(secure_store).map_err(|_| anyhow::anyhow!("init called twice"))?;
+    crate::hidden::seal_all();
     core.events.set(events).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
     let seeds = parse_seeds(&resolver_seeds)?;

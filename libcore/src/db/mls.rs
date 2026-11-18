@@ -180,6 +180,8 @@ const MIGRATION_ARRAY: &[M] = &[
             UNIQUE(group_id,sender,dispatch_id)
         );
     "#),
+    // A hidden chat's sender is sealed into the envelope; `sender` then holds a keyed hash.
+    M::up("ALTER TABLE mls_private_inbox ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

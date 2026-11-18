@@ -44,6 +44,10 @@ pub fn pair_from_qr(qr_bytes: Vec<u8>) -> Result<(), CoreError> {
     if qr.ipk == me.ipk() {
         return Err(CoreError::Internal { msg: "cannot pair with yourself".into() });
     }
+    // Adding someone hidden sends and saves nothing, so it fails like any unreachable add.
+    if crate::hidden::chat_with(&qr.ipk).is_some() {
+        return Ok(());
+    }
     let pairing = PairingP { invite: qr.invite, sender_name: me.name() };
 
     // `pair` saves the contact only once the Welcome is out, so an unreachable peer leaves no row.

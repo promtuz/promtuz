@@ -118,7 +118,7 @@ mod privacy_tests {
         let conv=crate::data::conversation::Conversation::create_group("Group", &[]).unwrap();
         let photo=b"\x00\x00\x00\x14ftypavif-private-photo".to_vec();
         receive_authorized(conv,1,Some(photo.clone())).unwrap();
-        crate::privacy::hide(&conv,"photo-secret-code").unwrap();
+        crate::privacy::lock(&conv,"photo-secret-code").unwrap();
         let raw:Vec<u8>=scope.core.db.messages().lock().query_row("SELECT avif FROM group_pictures WHERE conversation_id=?1",[conv],|r|r.get(0)).unwrap();
         assert_ne!(raw,photo);
         assert!(snapshot(&conv).is_none());
@@ -143,7 +143,7 @@ mod privacy_tests {
         receive_authorized(conv,1,Some(photo.clone())).unwrap();
         crate::data::message::Message::save_incoming(conv,[151;32],&[152;16],"still ordinary",1,None).unwrap();
         scope.core.db.messages().lock().execute_batch("CREATE TRIGGER refuse_photo_conversion BEFORE UPDATE ON group_pictures BEGIN SELECT RAISE(ABORT,'injected photo storage failure'); END").unwrap();
-        assert!(crate::privacy::hide(&conv,"photo-secret-code").is_err());
+        assert!(crate::privacy::lock(&conv,"photo-secret-code").is_err());
         assert!(!crate::privacy::is_private(&conv));
         assert_eq!(snapshot(&conv),Some((1,Some(photo))));
         assert_eq!(crate::data::message::Message::get_messages(&conv,100,"")[0].content,"still ordinary");

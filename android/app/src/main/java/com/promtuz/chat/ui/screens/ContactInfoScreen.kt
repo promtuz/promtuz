@@ -37,7 +37,13 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     val chats by app.chats.collectAsState()
     val privateIds by app.privateIds.collectAsState()
     val chat = chats.firstOrNull { !it.isGroup && (it.conversationHex == conversation || it.peerHex == peer) }
-    val hidden = chat != null && chat.conversationHex in privateIds
+    val locked = chat != null && chat.conversationHex in privateIds
+    val hidden = chat?.hidden == true
+    val tag by produceState<uniffi.core.HiddenTag?>(null, chat?.conversationHex, hidden) {
+        value = if (hidden && chat != null) runCatching { CoreBridge.hiddenTag(chat.conversationHex.fromHex()) }.getOrNull() else null
+    }
+    var hiding by remember { mutableStateOf(false) }
+    var hideBusy by remember { mutableStateOf(false) }
     var removingLock by remember { mutableStateOf(false) }
     var clearing by remember { mutableStateOf(false) }
     val directConversation = chat?.conversationHex ?: conversation
@@ -67,20 +73,29 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     val status = presenceText(presence, rememberPresenceTime())
     val c = Promtuz.colors
     ProfileScaffold(name = name, photo = { size ->
-        Avatar(name, size, image = picture, identityKey = peer, originKey = "contact:$peer",
-            onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("contact:$peer", it, name))) } })
-    }, subtitle = status, subtitleColor = if (presence == Presence.Online) c.accent else c.muted, actions = {
+        Box(Modifier.size(size)) {
+            Avatar(name, size, image = picture, identityKey = peer, originKey = "contact:$peer",
+                onClick = picture?.let { { MediaViewer.open(listOf(pictureItem("contact:$peer", it, name))) } })
+            if (hidden) AvatarBadge(R.drawable.oi_hidden_chat, size, Modifier.align(Alignment.BottomEnd))
+        }
+    }, subtitle = if (hidden) "Hidden" else status, subtitleIcon = if (hidden) R.drawable.oi_hidden_chat else null,
+        subtitleColor = if (!hidden && presence == Presence.Online) c.accent else c.muted, actions = {
         AppDropMenu(anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Contact options") }, groups = listOf(
             buildList {
                 if (profile?.canShare == true) add(MenuAction("Share contact", R.drawable.oi_export) { app.navigator.push(Routes.ContactCard(peer, profile?.name.orEmpty(), true)) })
                 if (chat != null && !chat.request) {
-                    if (hidden) add(MenuAction("Remove lock", R.drawable.oi_lock_chat_open) { removingLock = true })
+                    if (hidden) add(MenuAction("Unhide", R.drawable.oi_eye) {
+                        scope.launch { runCatching { CoreBridge.unhideConversation(chat.conversationHex.fromHex()) }
+                            .onFailure { error = "Couldn't unhide this chat" } }
+                    })
+                    else add(MenuAction("Hide chat", R.drawable.oi_hidden_chat) { hiding = true })
+                    if (locked) add(MenuAction("Remove lock", R.drawable.oi_lock_chat_open) { removingLock = true })
                     else add(MenuAction("Lock chat", R.drawable.oi_lock_chat) { app.navigator.push(Routes.LockChat(chat.conversationHex)) })
                 }
             },
-            buildList { if (chat != null && !hidden) add(MenuAction("Clear history", R.drawable.oi_broom) { clearing = true }) },
+            buildList { if (chat != null && !locked) add(MenuAction("Clear history", R.drawable.oi_broom) { clearing = true }) },
             buildList {
-                if (BuildConfig.DEBUG && !hidden) add(MenuAction("Debug info", R.drawable.oi_info) {
+                if (BuildConfig.DEBUG && !locked) add(MenuAction("Debug info", R.drawable.oi_info) {
                     scope.launch {
                         debug = runCatching { CoreBridge.contactsDiag().firstOrNull { it.ipk.contentEquals(peer.fromHex()) }?.let {
                             "Identity\n$peer\n\nMLS epoch: ${it.epoch ?: "-"}\nMessages: ${it.messageCount}\nPending operations: ${it.pendingOps}"
@@ -121,6 +136,11 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                         onClick = { nickname = profile?.nickname.orEmpty(); error = null })
                 }
             }
+            tag?.let { t -> item("tag") {
+                SettingsCard {
+                    SettingsRow("Tag", subtitle = "Shown instead of their name on reset", leading = { TagChip(t) }, leadingSize = 40.dp)
+                }
+            } }
             if (mediaCount > 0 && directConversation != null) item("media") {
                 SettingsCard {
                     SettingsRow("Shared media", icon = R.drawable.i_image, value = mediaCount.toString(), trailing = Trailing.Chevron,
@@ -152,4 +172,16 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
     if (clearing && chat != null) ClearHistoryDialog(name,
         onConfirm = { clearing = false; app.clearHistory(chat.conversationHex) }, onDismiss = { clearing = false })
     if (removingLock && chat != null) RemoveLockDialog(app, chat.conversationHex, chat.name) { removingLock = false }
+    if (hiding && chat != null) HideChatSheet(name, hideBusy, onDismiss = { hiding = false }, onHide = {
+        if (!locked) { hiding = false; app.navigator.push(Routes.LockChat(chat.conversationHex, hide = true)) }
+        else {
+            hideBusy = true
+            scope.launch {
+                runCatching { CoreBridge.hideConversation(chat.conversationHex.fromHex(), null) }
+                    .onSuccess { HiddenNotice.conversation.value = chat.conversationHex; hiding = false }
+                    .onFailure { error = it.message ?: "Couldn't hide this chat"; hiding = false }
+                hideBusy = false
+            }
+        }
+    })
 }

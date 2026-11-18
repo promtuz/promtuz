@@ -22,7 +22,7 @@ const TABLES: &[&str] = &[
     "private_file_refs",
 ];
 #[derive(Serialize, Deserialize)]
-enum Cell {
+pub(crate) enum Cell {
     Null,
     Integer(i64),
     Real(f64),
@@ -50,7 +50,7 @@ impl Cell {
     }
 }
 #[derive(Serialize, Deserialize)]
-struct Table {
+pub(crate) struct Table {
     name: String,
     columns: Vec<String>,
     rows: Vec<Vec<Cell>>,
@@ -63,6 +63,31 @@ pub(crate) struct History {
 }
 fn columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     Ok(crate::db::all(conn, &format!("PRAGMA table_info({table})"), [], |r| r.get(1))?)
+}
+/// `filter` binds `?1` to `value`.
+pub(crate) fn dump_where(conn: &Connection, name: &str, filter: &str, value: &[u8]) -> Result<Table> {
+    let columns = columns(conn, name)?;
+    let mut query = conn.prepare(&format!("SELECT * FROM {name} WHERE {filter}"))?;
+    let mut rows = query.query([value])?;
+    let mut saved = Vec::new();
+    while let Some(row) = rows.next()? {
+        saved.push((0..columns.len()).map(|i| Cell::read(row.get_ref(i)?)).collect::<Result<Vec<_>>>()?);
+    }
+    Ok(Table { name: name.into(), columns, rows: saved })
+}
+pub(crate) fn insert(conn: &Connection, table: &Table) -> Result<()> {
+    let actual = columns(conn, &table.name)?;
+    ensure!(table.columns.iter().all(|c| actual.contains(c)), "unsupported table schema");
+    let names = table.columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(",");
+    let params = (1..=table.columns.len()).map(|n| format!("?{n}")).collect::<Vec<_>>().join(",");
+    for row in &table.rows {
+        ensure!(row.len() == table.columns.len(), "invalid table row");
+        conn.execute(
+            &format!("INSERT OR IGNORE INTO {}({names}) VALUES({params})", table.name),
+            rusqlite::params_from_iter(row.iter().map(Cell::value)),
+        )?;
+    }
+    Ok(())
 }
 pub(crate) fn dump(conn: &Connection) -> Result<Vec<History>> {
     let ids = crate::privacy::ids_tx(conn)?;
@@ -124,22 +149,10 @@ pub(crate) fn restore(conn: &Connection, histories: &[History]) -> Result<()> {
         ensure!((8..=TABLES.len()).contains(&history.tables.len()), "invalid private backup tables");
         for (table, &expected) in history.tables.iter().zip(TABLES) {
             ensure!(table.name == expected, "invalid private backup table order");
-            let actual = columns(conn, expected)?;
-            ensure!(table.columns == actual, "unsupported private backup schema");
             // Older suffixes carried these rows without their files. Retain any valid local
             // copy already owned by this device and let restored media fetch its own bytes.
             if expected == "private_files" { continue; }
-            let names =
-                table.columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(",");
-            let params = (1..=actual.len()).map(|n| format!("?{n}")).collect::<Vec<_>>().join(",");
-            for row in &table.rows {
-                ensure!(row.len() == actual.len(), "invalid private backup row");
-                let values = row.iter().map(Cell::value).collect::<Vec<_>>();
-                conn.execute(
-                    &format!("INSERT OR IGNORE INTO {expected}({names}) VALUES({params})"),
-                    rusqlite::params_from_iter(values),
-                )?;
-            }
+            insert(conn, table)?;
         }
         // History remains code protected; ordinary session recovery creates a new MLS session.
         if live.is_none() {
@@ -157,7 +170,7 @@ mod tests {
         let source = crate::test_support::ScopedCore::new();
         let id = [58u8;16];
         source.core.db.messages().lock().execute("INSERT INTO conversations(id) VALUES(?1)",[id]).unwrap();
-        crate::privacy::hide(&id,"file-backup-code").unwrap();
+        crate::privacy::lock(&id,"file-backup-code").unwrap();
         let mut history = dump(&source.core.db.messages().lock()).unwrap();
         // Older backups can contain a path and complete flag without the actual encrypted
         // attachment. The destination must obtain bytes through its authenticated media offer.
@@ -200,7 +213,7 @@ mod tests {
             None,
         )
         .unwrap();
-        crate::privacy::hide(&id, "backup secret code").unwrap();
+        crate::privacy::lock(&id, "backup secret code").unwrap();
         crate::privacy::unlock("backup secret code").unwrap();
         let history = dump(&source.core.db.messages().lock()).unwrap();
         let bytes = postcard::to_allocvec(&history).unwrap();

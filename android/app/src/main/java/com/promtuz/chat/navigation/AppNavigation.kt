@@ -51,6 +51,7 @@ fun AppNavigation(
                 session.revision.collectAsState().value
                 // Process-local: a restored entry never carries a session, so it asks for the code again.
                 var opened by remember(key) { mutableStateOf(key.sessionId) }
+                if (opened == null && active == key.conversation) opened = session.sessionId
                 val hidden = com.promtuz.core.CoreBridge.privateConversationIds().any {
                     it.contentEquals(key.conversation.fromHex())
                 }
@@ -121,6 +122,8 @@ fun AppNavigation(
                         appViewModel.clearPrivateSummary()
                         appViewModel.navigator.reset(Routes.App)
                     },
+                    hide = key.hide,
+                    onHidden = { if (backStack.lastOrNull() == key) backStack.removeLastOrNull() },
                 )
             }
             entry<Routes.ProfilePhoto> { key ->

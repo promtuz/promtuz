@@ -3,7 +3,7 @@ use crate::{platform::CoreError, state::core};
 use common::types::bytes::fixed;
 use zeroize::Zeroizing;
 #[uniffi::export]
-pub fn hide_conversation(conversation_id: Vec<u8>, code: String) -> Result<(), CoreError> {
+pub fn lock_conversation(conversation_id: Vec<u8>, code: String) -> Result<(), CoreError> {
     let code = Zeroizing::new(code);
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     let record = crate::data::conversation::Conversation::get(&conv)
@@ -14,8 +14,53 @@ pub fn hide_conversation(conversation_id: Vec<u8>, code: String) -> Result<(), C
     if crate::call::current().is_some_and(|call| call.conversation == conv) {
         return Err(anyhow::anyhow!("End the call before locking this chat").into());
     }
-    crate::privacy::hide(&conv, &code)?;
+    crate::privacy::lock(&conv, &code)?;
     Ok(())
+}
+#[derive(uniffi::Record)]
+pub struct HiddenTag {
+    pub code: String,
+    /// An index into the client's tag palette.
+    pub color: u8,
+}
+impl From<crate::hidden::Tag> for HiddenTag {
+    fn from(t: crate::hidden::Tag) -> Self {
+        Self { code: t.code, color: t.color }
+    }
+}
+/// Locks the chat first when `code` is given; otherwise it must be locked and open.
+#[uniffi::export]
+pub fn hide_conversation(conversation_id: Vec<u8>, code: Option<String>) -> Result<HiddenTag, CoreError> {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    match code {
+        Some(code) => {
+            let code = Zeroizing::new(code);
+            let generation = private_generation();
+            lock_conversation(conversation_id, code.to_string())?;
+            // The person just chose the code, so the chat stays open as if they had entered it.
+            crate::privacy::unlock_at(&code, generation)?;
+        },
+        None if !core().private_sessions.read().contains_key(&conv) => {
+            return Err(anyhow::anyhow!("Chat is locked").into());
+        },
+        None => {},
+    }
+    Ok(crate::hidden::hide(&conv)?.into())
+}
+#[uniffi::export]
+pub fn unhide_conversation(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::hidden::unhide(&conv)?;
+    Ok(())
+}
+/// Shown only while the chat is open.
+#[uniffi::export]
+pub fn hidden_tag(conversation_id: Vec<u8>) -> Option<HiddenTag> {
+    let conv = fixed::<16>(&conversation_id, "conversation id").ok()?;
+    if !core().private_sessions.read().contains_key(&conv) {
+        return None;
+    }
+    crate::hidden::tag(&conv).map(Into::into)
 }
 #[uniffi::export]
 pub fn unlock_private_conversation(code: String, generation: u64) -> Result<Option<Vec<u8>>, CoreError> {
@@ -43,12 +88,15 @@ pub fn cancel_private_unlocks() {
 }
 #[uniffi::export]
 pub fn lock_private_conversations() {
-    let _operations = core().mls_operations.iter().map(|lock| lock.lock()).collect::<Vec<_>>();
-    let mut sessions = core().private_sessions.write();
-    core().private_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    sessions.clear();
-    drop(sessions);
+    {
+        let _operations = core().mls_operations.iter().map(|lock| lock.lock()).collect::<Vec<_>>();
+        let mut sessions = core().private_sessions.write();
+        core().private_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        sessions.clear();
+    }
     crate::staging::lock_private();
+    // After the operation locks: sealing takes the configuration lock, which ranks before them.
+    crate::hidden::seal_all();
 }
 #[uniffi::export]
 pub fn remove_conversation_lock(conversation_id: Vec<u8>) -> Result<(), CoreError> {
@@ -98,12 +146,24 @@ pub struct PrivateResetOption {
     pub conversation_id: Vec<u8>,
     pub name: String,
     pub is_group: bool,
+    /// A hidden chat is listed by its tag, never by name.
+    pub tag: Option<HiddenTag>,
+    /// Unix seconds; 0 for a lock made before this was recorded.
+    pub locked_at: u64,
 }
 #[uniffi::export]
 pub fn locked_conversation_reset_options() -> Result<Vec<PrivateResetOption>, CoreError> {
     use crate::data::conversation::{Conversation, KIND_GROUP};
     let ids = crate::privacy::ids_tx(&core().db.messages().lock())?;
+    let locked_at = |id: &[u8; 16]| -> u64 {
+        core().db.messages().lock()
+            .query_row("SELECT locked_at FROM private_conversations WHERE conversation_id=?1", [id], |r| r.get::<_, Option<u64>>(0))
+            .ok().flatten().unwrap_or(0)
+    };
     Ok(ids.into_iter().filter_map(|id| {
+        if let Some(tag) = crate::hidden::tag(&id) {
+            return Some(PrivateResetOption { conversation_id: id.to_vec(), name: String::new(), is_group: false, tag: Some(tag.into()), locked_at: locked_at(&id) });
+        }
         let record = Conversation::get(&id)?;
         let is_group = record.kind == KIND_GROUP;
         let name = if is_group && !record.title.is_empty() {
@@ -115,7 +175,7 @@ pub fn locked_conversation_reset_options() -> Result<Vec<PrivateResetOption>, Co
             if names.is_empty() { if is_group { "Group".into() } else { "Contact".into() } }
             else { names.join(", ") }
         };
-        Some(PrivateResetOption { conversation_id: id.to_vec(), name, is_group })
+        Some(PrivateResetOption { conversation_id: id.to_vec(), name, is_group, tag: None, locked_at: locked_at(&id) })
     }).collect())
 }
 #[uniffi::export]
@@ -131,6 +191,11 @@ pub fn reset_private_conversation(conversation_id: Vec<u8>) -> Result<(), CoreEr
         let mut sessions = core().private_sessions.write();
         core().private_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         sessions.remove(&conv);
+    }
+    // A hidden person goes with the code: seal any restored rows so the reset discards them.
+    let hidden = crate::hidden::is_hidden(&conv);
+    if hidden {
+        crate::hidden::seal_held(&conv)?;
     }
     {
         let mls = core().db.mls();
@@ -159,7 +224,9 @@ pub fn reset_private_conversation(conversation_id: Vec<u8>) -> Result<(), CoreEr
         .is_some_and(|c| c.kind == crate::data::conversation::KIND_GROUP);
     // Group identity and roster are the equivalent of keeping a direct contact. They are
     // required to authenticate a fresh member-owned KeyPackage recovery, never old traffic.
-    if !is_group {
+    if hidden {
+        tx.execute("DELETE FROM conversations WHERE id=?1", [conv]).map_err(anyhow::Error::from)?;
+    } else if !is_group {
         tx.execute("UPDATE conversations SET mls_group_id=NULL WHERE id=?1", [conv])
             .map_err(anyhow::Error::from)?;
     }

@@ -201,15 +201,24 @@ object CoreBridge {
     suspend fun previewInvite(bytes: ByteArray): InvitePreview =
         withContext(Dispatchers.IO) { ffiPreviewInvite(bytes) }
 
-    suspend fun hideConversation(id: ByteArray, code: String) = withContext(Dispatchers.IO) {
+    suspend fun lockConversation(id: ByteArray, code: String) = withContext(Dispatchers.IO) {
+        check(com.promtuz.core.call.CallController.state.value?.conversation?.contentEquals(id) != true) {
+            "End the call before locking this chat."
+        }
+        uniffi.core.lockConversation(id, code)
+    }
+    suspend fun unlockPrivateConversation(code: String, generation: Long): ByteArray? = withContext(Dispatchers.IO) {
+        uniffi.core.unlockPrivateConversation(code, generation.toULong())
+    }
+    /** Locks with [code] first when it's given; otherwise the chat must be open. */
+    suspend fun hideConversation(id: ByteArray, code: String?): uniffi.core.HiddenTag = withContext(Dispatchers.IO) {
         check(com.promtuz.core.call.CallController.state.value?.conversation?.contentEquals(id) != true) {
             "End the call before hiding this chat."
         }
         uniffi.core.hideConversation(id, code)
     }
-    suspend fun unlockPrivateConversation(code: String, generation: Long): ByteArray? = withContext(Dispatchers.IO) {
-        uniffi.core.unlockPrivateConversation(code, generation.toULong())
-    }
+    suspend fun unhideConversation(id: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.unhideConversation(id) }
+    suspend fun hiddenTag(id: ByteArray): uniffi.core.HiddenTag? = withContext(Dispatchers.IO) { uniffi.core.hiddenTag(id) }
     fun lockPrivateConversations() = uniffi.core.lockPrivateConversations()
     fun privateConversationIds(): List<ByteArray> = uniffi.core.privateConversationIds()
     fun isPrivateConversationUnlocked(id: ByteArray): Boolean = uniffi.core.isPrivateConversationUnlocked(id)

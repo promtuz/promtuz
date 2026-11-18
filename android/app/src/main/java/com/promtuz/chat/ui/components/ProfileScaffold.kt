@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,6 +42,7 @@ fun ProfileScaffold(
     photo: @Composable (Dp) -> Unit,
     subtitle: String? = null,
     subtitleColor: Color = Promtuz.colors.muted,
+    @androidx.annotation.DrawableRes subtitleIcon: Int? = null,
     actions: @Composable RowScope.() -> Unit = {},
     snackbarHost: @Composable () -> Unit = {},
     content: @Composable (PaddingValues, LazyListState) -> Unit,
@@ -88,8 +90,11 @@ fun ProfileScaffold(
                     Modifier.offset(x = textX, y = lerp(180.dp, 34.dp, progress)).width(textW).height(20.dp),
                     contentAlignment = align,
                 ) {
-                    Text(subtitle, style = lerp(ProfileStatusStyle, ProfileStatusSmall, progress), color = subtitleColor,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        subtitleIcon?.let { DrawableIcon(it, size = 15.dp, tint = subtitleColor) }
+                        Text(subtitle, style = lerp(ProfileStatusStyle, ProfileStatusSmall, progress), color = subtitleColor,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 // Keep the same controls and hit targets throughout the collapse.
                 TopAppBar(

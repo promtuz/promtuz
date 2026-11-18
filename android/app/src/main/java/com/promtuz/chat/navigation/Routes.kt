@@ -37,7 +37,7 @@ object Routes : NavKey {
     data object Profile : NavKey
 
     @Serializable
-    data class LockChat(val conversation: String) : NavKey
+    data class LockChat(val conversation: String, val hide: Boolean = false) : NavKey
 
     @Serializable
     data class ProfilePhoto(val uri: String, val group: String? = null) : NavKey

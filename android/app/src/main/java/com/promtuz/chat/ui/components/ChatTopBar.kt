@@ -184,6 +184,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                     subtitle = subtitle,
                     subtitleColor = subtitleColor,
                     animateChanges = headerReady,
+                    nameIcon = if (summary?.hidden == true) R.drawable.oi_hidden_chat else null,
                     modifier = Modifier.weight(1f, fill = false),
                     onClick = if (isGroup) {
                         { navigator.push(Routes.GroupInfo(chatVM.conversationHex)) }
@@ -257,11 +258,15 @@ internal fun ChatBarTitle(
     subtitleColor: Color,
     modifier: Modifier = Modifier,
     animateChanges: Boolean = true,
+    @androidx.annotation.DrawableRes nameIcon: Int? = null,
     onClick: (() -> Unit)? = null,
 ) {
     Column(modifier.then(if (onClick != null) Modifier.pressScale(onClick, 0.96f) else Modifier)) {
-        Text(name, style = MaterialTheme.typography.titleMediumEmphasized,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMediumEmphasized,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            nameIcon?.let { DrawableIcon(it, size = 16.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
         // Keep the queue mounted through absence. The empty target has zero height,
         // so its size transition recenters the name without interrupting a subtitle.
         val subtitleContent: @Composable (String?) -> Unit = { value ->

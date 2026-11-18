@@ -11,6 +11,12 @@ import androidx.core.content.FileProvider
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.draw.clip
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -143,8 +149,14 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             groupingNow = System.currentTimeMillis()
         }
     }
-    val rows = remember(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow, calendar) {
-        buildChatRows(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow, calendar.zone)
+    val justHidden = com.promtuz.chat.ui.components.HiddenNotice.conversation.collectAsState().value == viewModel.conversationHex
+    DisposableEffect(viewModel.conversationHex) {
+        onDispose {
+            com.promtuz.chat.ui.components.HiddenNotice.conversation.compareAndSet(viewModel.conversationHex, null)
+        }
+    }
+    val rows = remember(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow, calendar, justHidden) {
+        buildChatRows(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow, calendar.zone, justHidden)
     }
     val stage = rememberMessageStageState()
     val metrics = rememberComposerMetrics()
@@ -360,6 +372,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                         else -> {}
                     }
                     is ChatRow.Date -> ChatDateDivider(chatRow.date, calendar.today) { selectedDate = chatRow.date }
+                    ChatRow.HiddenNotice -> HiddenNoticeCard(name, Modifier.padding(top = layout.groupGap.dp))
                     is ChatRow.Typing -> {
                         val gap by androidx.compose.animation.core.animateDpAsState(
                             if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp,
@@ -567,6 +580,24 @@ private fun CallRow(content: MessageContent.Call, modifier: Modifier = Modifier)
 }
 
 @Composable
+private fun HiddenNoticeCard(name: String, modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.widthIn(max = 250.dp).clip(RoundedCornerShape(16.dp))
+                .background(Promtuz.colors.card.copy(alpha = 0.92f)).padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            com.promtuz.chat.ui.components.DrawableIcon(com.promtuz.chat.R.drawable.oi_hidden_chat, size = 24.dp, tint = Promtuz.colors.text)
+            Text(
+                "You hid this chat. Search your code on the home screen to open it. $name isn't told.",
+                style = MaterialTheme.typography.bodyMedium, color = Promtuz.colors.text, textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
 private fun SystemRow(content: MessageContent.System, modifier: Modifier = Modifier) {
     val marker = LocalChatColors.current.marker
     Row(
@@ -587,6 +618,7 @@ private fun rowKey(row: ChatRow): Any = when (row) {
     is ChatRow.System -> row.msg.key
     is ChatRow.Typing -> "typing"
     is ChatRow.Date -> row
+    ChatRow.HiddenNotice -> "hidden-notice"
 }
 
 /** Resolves the bottom on each call, so the stage reads the composer's footprint during measure. */

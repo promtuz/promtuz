@@ -172,8 +172,10 @@ fun GroupAvatar(
 }
 
 /** Keyed on identity, so the color survives renames and restores. */
-fun avatarColor(identityKey: String): Color {
-    val palette = longArrayOf(0xFFB74459, 0xFF9A5527, 0xFF387A51, 0xFF237A80,
-        0xFF376FB0, 0xFF7355AC, 0xFFA24882, 0xFF546A83)
-    return Color(palette[Math.floorMod(identityKey.hashCode(), palette.size)])
-}
+fun avatarColor(identityKey: String): Color = avatarPalette(identityKey.hashCode())
+
+/** Hidden chat tags index the same palette. */
+fun avatarPalette(index: Int): Color = Color(AvatarPalette[Math.floorMod(index, AvatarPalette.size)])
+
+private val AvatarPalette = longArrayOf(0xFFB74459, 0xFF9A5527, 0xFF387A51, 0xFF237A80,
+    0xFF376FB0, 0xFF7355AC, 0xFFA24882, 0xFF546A83)

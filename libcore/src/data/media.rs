@@ -642,7 +642,7 @@ mod tests {
             thumb: Some(b"private-preview".to_vec()), file_id: None, sticker: None, hd: None,
         };
         save(&conv, &did, &row).unwrap();
-        crate::privacy::hide(&conv, "media-secret").unwrap();
+        crate::privacy::lock(&conv, "media-secret").unwrap();
         let (mime, name, blob, thumb): (String, String, Vec<u8>, Option<Vec<u8>>) = scope.core.db.messages().lock()
             .query_row("SELECT mime,name,blob,thumb FROM message_media", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
         assert_ne!(mime, row.mime); assert!(name.is_empty()); assert!(thumb.is_none());
@@ -662,7 +662,7 @@ mod tests {
         let scope = crate::test_support::ScopedCore::new();
         let conv = [97;16]; let did = [98;16];
         scope.core.db.messages().lock().execute("INSERT INTO conversations(id) VALUES(?1)", [conv]).unwrap();
-        crate::privacy::hide(&conv, "offer-secret").unwrap();
+        crate::privacy::lock(&conv, "offer-secret").unwrap();
         let row = MediaRow {
             kind: KIND_ATTACHMENT, group_id: None, mime: "application/pdf".into(), name: "private.pdf".into(),
             size: 9, width: 0, height: 0, duration_ms: 0, blob: None,
@@ -692,7 +692,7 @@ mod tests {
             name: "keep.pdf".into(), size, width: 0, height: 0, duration_ms: 0, blob: None,
             thumb: None, file_id: Some(file.to_vec()), sticker: None, hd: None };
         save(&conv, &did, &row).unwrap(); save(&ordinary, &did, &row).unwrap();
-        crate::privacy::hide(&conv, "file-secret").unwrap();
+        crate::privacy::lock(&conv, "file-secret").unwrap();
         assert_eq!(std::fs::read(&old).unwrap(), bytes, "the ordinary shared owner retains its source");
         assert!(get(&conv, &did).is_err());
         crate::privacy::unlock("file-secret").unwrap();

@@ -189,6 +189,7 @@ class AppVM(
             unreadCount = unread,
             muted = true, rawTitle = c.title, amMember = c.amMember, canLeave = c.canLeave,
             ownerIsStuck = c.ownerIsStuck, commits = c.commits, request = c.request,
+            locked = true, hidden = c.hidden,
         )
         // A background transition can revoke access while the IO reads are in flight.
         if (com.promtuz.chat.security.PrivateChatSession.generation != generation ||
@@ -349,6 +350,7 @@ class AppVM(
                 rawTitle = c.title,
                 request = c.request,
                 locked = c.locked,
+                hidden = c.hidden,
             )
         }
     } catch (e: Exception) {

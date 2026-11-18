@@ -248,11 +248,7 @@ internal fun LockedAvatar(name: String, chat: com.promtuz.chat.domain.model.Chat
     Box(Modifier.size(size)) {
         if (chat?.isGroup == true) GroupAvatar(name, emptyList(), size, conversation = conversation)
         else Avatar(name, size, identityKey = chat?.peerHex ?: conversation, image = rememberAvatar(chat?.peerHex))
-        Box(
-            Modifier.align(Alignment.BottomEnd).offset(4.dp, 4.dp).size(size * 0.375f).clip(CircleShape)
-                .background(MaterialTheme.colorScheme.background).padding(3.dp).clip(CircleShape).background(c.card),
-            contentAlignment = Alignment.Center,
-        ) {
+        AvatarBadge(size, Modifier.align(Alignment.BottomEnd)) {
             Crossfade(opened, animationSpec = tween(180), label = "lock") { open ->
                 DrawableIcon(if (open) R.drawable.oi_lock_chat_open else R.drawable.oi_lock_chat, size = size * 0.2f, tint = c.muted)
             }

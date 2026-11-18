@@ -12,6 +12,7 @@ internal sealed interface ChatRow {
     data class System(val msg: UiMessage) : ChatRow
     data class Typing(val mergedTop: Boolean) : ChatRow
     data class Date(val date: LocalDate, val oldestMessageKey: String) : ChatRow
+    data object HiddenNotice : ChatRow
 }
 
 /** Newest-first rows; a date follows its messages so it appears above them on the stage. */
@@ -23,12 +24,14 @@ internal fun buildChatRows(
     isGroup: Boolean,
     nowMs: Long,
     zone: ZoneId,
+    hiddenNotice: Boolean = false,
 ): List<ChatRow> {
     val dates = messages.map { Instant.ofEpochMilli(it.timestampMs).atZone(zone).toLocalDate() }
     val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
     val joinsTyping = typing && dates.firstOrNull() == today &&
         typingJoinsMessage(messages.firstOrNull(), typingMembers, isGroup, nowMs, mergeWindowMs)
-    val rows = ArrayList<ChatRow>(messages.size + 1)
+    val rows = ArrayList<ChatRow>(messages.size + 2)
+    if (hiddenNotice) rows.add(ChatRow.HiddenNotice)
     if (typing) rows.add(ChatRow.Typing(joinsTyping))
     for (i in messages.indices) {
         val message = messages[i]

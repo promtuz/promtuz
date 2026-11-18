@@ -456,7 +456,7 @@ mod tests {
             mime: "application/octet-stream".into(), name: "private.bin".into(), size:35,
             width:0,height:0,duration_ms:0,blob:None,thumb:None,file_id:Some(file.to_vec()),sticker:None,hd:None };
         crate::data::media::save(&conv,&did,&row).unwrap();
-        crate::privacy::hide(&conv,"resume-code").unwrap();
+        crate::privacy::lock(&conv,"resume-code").unwrap();
         assert!(first.cancel.is_cancelled()); assert!(!std::path::Path::new(&old).exists());
         crate::privacy::unlock("resume-code").unwrap();
         let second = store::receiver_lease(scope.core,file); let mut private = open(&second);

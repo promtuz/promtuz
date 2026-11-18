@@ -32,7 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Unit) {
+fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Unit, hide: Boolean = false, onHidden: () -> Unit = onLocked) {
     DisposableEffect(Unit) {
         val protection = PrivateChatSession.protectInput()
         onDispose { protection.close() }
@@ -68,16 +68,22 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
         if (chosen != confirmed) return fail("Codes don't match. Try again.")
         busy = true
         scope.launch {
-            runCatching { CoreBridge.hideConversation(conversation.fromHex(), chosen) }
+            runCatching {
+                if (hide) CoreBridge.hideConversation(conversation.fromHex(), chosen)
+                else CoreBridge.lockConversation(conversation.fromHex(), chosen)
+            }
                 .onSuccess {
                     com.promtuz.core.call.CallNotifications.clearConversation(context, conversation.fromHex())
                     runCatching { com.promtuz.core.push.PushNotifier.refresh() }
                     haptic.performHapticFeedback(HapticFeedbackType.Confirm)
                     done = true
                     delay(600)
-                    onLocked()
+                    if (hide && PrivateChatSession.arm(conversation)) {
+                        HiddenNotice.conversation.value = conversation
+                        onHidden()
+                    } else onLocked()
                 }
-                .onFailure { first = null; fail(it.message ?: "Couldn't lock this chat") }
+                .onFailure { first = null; fail(it.message ?: if (hide) "Couldn't hide this chat" else "Couldn't lock this chat") }
             busy = false
         }
     }
@@ -95,7 +101,7 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
     LaunchedEffect(pin) { if (pin) keys.requestFocus() }
 
     SimpleScreen(
-        title = { Text("Lock chat") },
+        title = { Text(if (hide) "Hide chat" else "Lock chat") },
         connectionStatus = false,
         navigationIcon = {
             IconButton(onClick = { if (first != null) restart() else onBack() }, enabled = !busy) {
@@ -118,6 +124,7 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
                     Spacer(Modifier.height(8.dp))
                     Text(
                         if (confirming) "If you forget it, resetting deletes this chat's history."
+                        else if (hide) "Enter it in search on the home screen\nto open this chat."
                         else "You'll need it to open this chat.\nIt won't send notifications.",
                         style = LockBodyStyle, textAlign = TextAlign.Center, minLines = 2,
                         color = Promtuz.colors.muted,
