@@ -17,6 +17,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -79,10 +80,14 @@ fun HomeSearchBar(
                     onClick()
                 },
             ))
-            .then(if (haze != null) Modifier.floatingSurface(RoundedCornerShape(Radii.field), haze)
-                else Modifier.clip(RoundedCornerShape(Radii.field))
-                    .background(if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage)),
     ) {
+        val shape = RoundedCornerShape(Radii.field)
+        // The glass fades in as the bar leaves Home's solid field and out as it returns, so neither end swaps.
+        if (haze != null) Box(Modifier.matchParentSize()
+            .graphicsLayer { alpha = motion.fraction().coerceIn(0f, 1f) }.frost(haze, FrostRole.Floating, shape))
+        Box(Modifier.matchParentSize()
+            .then(if (haze != null) Modifier.graphicsLayer { alpha = 1f - motion.fraction().coerceIn(0f, 1f) } else Modifier)
+            .clip(shape).background(if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage))
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(44.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
                 DrawableIcon(R.drawable.oi_search, size = 18.dp, strokeWidth = 2.25f,
@@ -105,7 +110,7 @@ fun HomeSearchBar(
                         onValueChange = onQueryChange,
                         singleLine = true,
                         textStyle = searchTextStyle().copy(color = Promtuz.colors.text),
-                        cursorBrush = SolidColor(Promtuz.colors.accentFill),
+                        cursorBrush = SolidColor(if (motion.transitioning) Color.Transparent else Promtuz.colors.accentFill),
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
                             autoCorrectEnabled = false,

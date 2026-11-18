@@ -118,9 +118,9 @@ fun ProfileActions(actions: List<MenuAction>, modifier: Modifier = Modifier) {
                 horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(6.dp, androidx.compose.ui.Alignment.CenterVertically),
             ) {
-                action.icon?.let { DrawableIcon(it, size = 22.dp, tint = c.accent) }
+                action.icon?.let { DrawableIcon(it, size = 22.dp, tint = c.text) }
                 Text(action.label, style = TextStyle(fontSize = 13.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
-                    color = c.accent, maxLines = 1)
+                    color = c.text, maxLines = 1)
             }
         }
     }
