@@ -38,14 +38,13 @@ import com.promtuz.chat.presentation.viewmodel.ProfileVM
 import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import com.promtuz.chat.ui.appearance.AppearanceStore
-import com.promtuz.chat.ui.components.AppIconButton
+import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.CardGap
 import com.promtuz.chat.ui.components.SettingsCard
 import com.promtuz.chat.ui.components.SettingsRow
 import com.promtuz.chat.ui.components.GroupedScreen
 import com.promtuz.chat.ui.theme.Radii
-import com.promtuz.chat.ui.components.concentric
 import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.update.offered
@@ -196,8 +195,12 @@ private fun ProfileCard(
             Text(bio.ifBlank { "Add a bio" }, style = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
                 color = c.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Box(Modifier.clip(RoundedCornerShape(concentric(Radii.card, pad))).background(c.cardHigh)) {
-            AppIconButton(R.drawable.oi_qr_code, "My QR code", onQr, Modifier.size(48.dp), tint = c.accent)
+        Box(
+            Modifier.size(48.dp).clip(RoundedCornerShape(Radii.iconButton)).background(c.cardHigh)
+                .clickable(role = Role.Button, onClickLabel = "My QR code", onClick = onQr),
+            contentAlignment = Alignment.Center,
+        ) {
+            DrawableIcon(R.drawable.i_qr_code, desc = "My QR code", size = 24.dp, tint = c.accent)
         }
     }
 }

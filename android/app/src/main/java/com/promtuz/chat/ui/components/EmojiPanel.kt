@@ -97,6 +97,7 @@ private val SectionLabel = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontW
 private val Mono = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
 
 private enum class ComposerPanelTab { Emoji, Stickers }
+private val PanelTabs = listOf(GlassTabItem("Emoji"), GlassTabItem("Stickers"))
 
 // Process-wide, so reopening the panel lands where it was left.
 private var lastPanelTab by mutableStateOf(ComposerPanelTab.Emoji)
@@ -117,10 +118,7 @@ fun EmojiStickerPanel(
                 ComposerPanelTab.Stickers -> stickers(barSpace)
             }
         }
-        GlassTabBar(local, Modifier.align(Alignment.BottomCenter)) {
-            GlassTab("Emoji", null, lastPanelTab == ComposerPanelTab.Emoji) { lastPanelTab = ComposerPanelTab.Emoji }
-            GlassTab("Stickers", null, lastPanelTab == ComposerPanelTab.Stickers) { lastPanelTab = ComposerPanelTab.Stickers }
-        }
+        GlassTabBar(local, PanelTabs, lastPanelTab.ordinal, { lastPanelTab = ComposerPanelTab.entries[it] }, Modifier.align(Alignment.BottomCenter))
         if (lastPanelTab == ComposerPanelTab.Emoji) Box(
             Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 12.dp, bottom = 6.dp)
                 .size(44.dp).floatingSurface(CircleShape, local)

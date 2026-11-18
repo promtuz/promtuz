@@ -155,50 +155,51 @@ fun HomeSearchScreen(app: AppVM) {
     Box(Modifier.fillMaxSize().drawBehind {
         drawRect(background, alpha = motion.fraction().coerceIn(0f, 1f))
     }) {
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top))) {
-            Box(Modifier.zIndex(1f)) {
-                HomeSearchBar(expanded = true, query = query,
-                    onQueryChange = { query = it; revealed = null; revealedId = null }, focusRequester = focus)
+        LazyColumn(Modifier.fillMaxSize().hazeSource(menuHaze).graphicsLayer {
+            alpha = motion.fraction().coerceIn(0f, 1f)
+        }, contentPadding = WindowInsets.systemBars.asPaddingValues().listPadding(12.dp, SearchBarHeight + 4.dp, 24.dp)) {
+            if (results.isEmpty() && hits.isEmpty() && query.isNotBlank()) item {
+                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    Text("No results", style = RowSubtitleStyle, color = Promtuz.colors.muted)
+                }
             }
-            LazyColumn(Modifier.fillMaxWidth().weight(1f).hazeSource(menuHaze).graphicsLayer {
-                alpha = motion.fraction().coerceIn(0f, 1f)
-            }, contentPadding = WindowInsets.navigationBars.asPaddingValues().listPadding(12.dp, 0.dp, 24.dp)) {
-                if (results.isEmpty() && hits.isEmpty() && query.isNotBlank()) item {
-                    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                        Text("No results", style = RowSubtitleStyle, color = Promtuz.colors.muted)
+            if (results.isNotEmpty()) {
+                item("chats") { CardSectionLabel("Chats", Modifier.lazyCardRow(0, results.size + 1)) }
+                itemsIndexed(results, key = { _, it -> it.conversationHex }) { i, chat ->
+                    HomeChatListItem(chat, presence = null, typing = false, pinned = chat.pinned,
+                        muted = chat.muted && !chat.locked, menuState = menu, privateChat = chat.conversationHex == privateResult?.conversationHex,
+                        modifier = Modifier.lazyCardRow(i + 1, results.size + 1, dividerStart = 76.dp, divider = i > 0),
+                        onOpen = {
+                            if (chat.conversationHex != privateResult?.conversationHex) {
+                                PrivateChatSession.clear()
+                                app.clearPrivateSummary()
+                            }
+                            app.openChat(chat.conversationHex, chat.name)
+                        },
+                        onPin = { ChatPrefs.togglePin(chat.conversationHex, !chat.pinned) },
+                        onMute = { ChatPrefs.toggleMute(chat.conversationHex, !chat.muted) },
+                        onMarkRead = { app.markConversationRead(chat.conversationHex) },
+                        onClearHistory = { app.clearHistory(chat.conversationHex) },
+                        onDelete = { app.deleteChat(chat) }, onLeaveAndDelete = { app.leaveAndDelete(chat) })
+                }
+            }
+            if (hits.isNotEmpty()) {
+                if (results.isNotEmpty()) item("gap") { Spacer(Modifier.height(12.dp)) }
+                item("messages") { CardSectionLabel("Messages", Modifier.lazyCardRow(0, hits.size + 1)) }
+                itemsIndexed(hits, key = { _, it -> "m" + it.dispatchHex }) { i, hit ->
+                    MessageHitRow(hit, query, Modifier.lazyCardRow(i + 1, hits.size + 1, dividerStart = 76.dp, divider = i > 0)) {
+                        PrivateChatSession.clear()
+                        app.clearPrivateSummary()
+                        app.showMessage(MessageLocation(hit.chat.conversationHex, hit.chat.name, hit.dispatchHex, hit.timestampMs))
                     }
                 }
-                if (results.isNotEmpty()) {
-                    item("chats") { CardSectionLabel("Chats", Modifier.lazyCardRow(0, results.size + 1)) }
-                    itemsIndexed(results, key = { _, it -> it.conversationHex }) { i, chat ->
-                        HomeChatListItem(chat, presence = null, typing = false, pinned = chat.pinned,
-                            muted = chat.muted && !chat.locked, menuState = menu, privateChat = chat.conversationHex == privateResult?.conversationHex,
-                            modifier = Modifier.lazyCardRow(i + 1, results.size + 1, dividerStart = 76.dp, divider = i > 0),
-                            onOpen = {
-                                if (chat.conversationHex != privateResult?.conversationHex) {
-                                    PrivateChatSession.clear()
-                                    app.clearPrivateSummary()
-                                }
-                                app.openChat(chat.conversationHex, chat.name)
-                            },
-                            onPin = { ChatPrefs.togglePin(chat.conversationHex, !chat.pinned) },
-                            onMute = { ChatPrefs.toggleMute(chat.conversationHex, !chat.muted) },
-                            onMarkRead = { app.markConversationRead(chat.conversationHex) },
-                            onClearHistory = { app.clearHistory(chat.conversationHex) },
-                            onDelete = { app.deleteChat(chat) }, onLeaveAndDelete = { app.leaveAndDelete(chat) })
-                    }
-                }
-                if (hits.isNotEmpty()) {
-                    if (results.isNotEmpty()) item("gap") { Spacer(Modifier.height(12.dp)) }
-                    item("messages") { CardSectionLabel("Messages", Modifier.lazyCardRow(0, hits.size + 1)) }
-                    itemsIndexed(hits, key = { _, it -> "m" + it.dispatchHex }) { i, hit ->
-                        MessageHitRow(hit, query, Modifier.lazyCardRow(i + 1, hits.size + 1, dividerStart = 76.dp, divider = i > 0)) {
-                            PrivateChatSession.clear()
-                            app.clearPrivateSummary()
-                            app.showMessage(MessageLocation(hit.chat.conversationHex, hit.chat.name, hit.dispatchHex, hit.timestampMs))
-                        }
-                    }
-                }
+            }
+        }
+        Box(Modifier.fillMaxWidth().zIndex(1f)) {
+            FrostFade(menuHaze, Modifier.matchParentSize().graphicsLayer { alpha = motion.fraction().coerceIn(0f, 1f) })
+            Box(Modifier.statusBarsPadding()) {
+                HomeSearchBar(expanded = true, query = query, haze = menuHaze,
+                    onQueryChange = { query = it; revealed = null; revealedId = null }, focusRequester = focus)
             }
         }
         HomeContextMenu(menu, menuHaze)

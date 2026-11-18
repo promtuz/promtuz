@@ -295,30 +295,34 @@ private fun <T> ChoicePopup(
     onDismiss: () -> Unit, onPick: (T) -> Unit,
 ) {
     val c = Promtuz.colors
+    val slab = rememberSlabState(vertical = true)
+    val current = choices.indexOfFirst { it.value == selected }
     AppModal(onDismiss, maxWidth = 328.dp) {
         Column(
             Modifier.fillMaxWidth()
                 .floatingSurface(ModalShape)
                 .verticalScroll(androidx.compose.foundation.rememberScrollState())
                 .padding(start = 8.dp, end = 8.dp, top = 20.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(title, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp).semantics { heading() },
                 style = TextStyle(fontSize = 20.sp, lineHeight = 26.sp), color = c.text)
-            choices.forEach { choice ->
-                val on = choice.value == selected
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.tile))
-                        .background(if (on) c.glassFill else Color.Transparent)
-                        .clickable(role = Role.RadioButton) { onPick(choice.value) }
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text(choice.label, style = RowTitleStyle.copy(fontWeight = if (on) FontWeight.Medium else FontWeight.Normal),
-                        color = if (on) c.accent else c.text)
-                    choice.description?.let { Text(it, style = RowSubtitleStyle, color = c.muted) }
+            Column(
+                Modifier.slabHost(slab, current, c.glassFill, com.promtuz.chat.ui.theme.Radii.tile) { onPick(choices[it].value) },
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                choices.forEachIndexed { i, choice ->
+                    val on = slab.shown(current) == i
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .slabOption(slab, i, i == current, Role.RadioButton) { onPick(choice.value) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(choice.label, style = RowTitleStyle.copy(fontWeight = if (on) FontWeight.Medium else FontWeight.Normal),
+                            color = if (on) c.accent else c.text)
+                        choice.description?.let { Text(it, style = RowSubtitleStyle, color = c.muted) }
+                    }
                 }
             }
         }

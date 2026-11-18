@@ -284,15 +284,13 @@ fun AppSlider(
 @Composable
 fun SegmentedTabs(labels: List<String>, selected: Int, modifier: Modifier = Modifier, onSelect: (Int) -> Unit) {
     val c = Promtuz.colors
-    val track = cardFill()
-    val thumb = raisedFill()
-    Row(modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(track).padding(4.dp)) {
+    val slab = rememberSlabState()
+    Row(modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill())
+        .slabHost(slab, selected, raisedFill(), concentric(Radii.card, 4.dp), onSelect).padding(4.dp)) {
         labels.forEachIndexed { i, label ->
-            val on = i == selected
-            val fill by animateColorAsState(if (on) thumb else Color.Transparent, com.promtuz.chat.ui.stage.ChatMotion.spec(), label = "tab")
+            val on = slab.shown(selected) == i
             Box(
-                Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(concentric(Radii.card, 4.dp))).background(fill)
-                    .clickable(role = Role.Tab) { onSelect(i) },
+                Modifier.weight(1f).height(36.dp).slabOption(slab, i, i == selected, Role.Tab) { onSelect(i) },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(label, style = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = if (on) FontWeight.Medium else FontWeight.Normal),

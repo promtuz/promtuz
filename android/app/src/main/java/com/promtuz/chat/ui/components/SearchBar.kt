@@ -29,6 +29,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.toSize
 import com.promtuz.chat.R
 import com.promtuz.chat.navigation.LocalSearchMotion
+import dev.chrisbanes.haze.HazeState
+
+private val SearchFieldHeight = 48.dp
+/** The field plus its margins. */
+val SearchBarHeight = SearchFieldHeight + 14.dp
 
 /** Search hints inherit exactly the same metrics as the text replacing them. */
 @Composable
@@ -41,6 +46,7 @@ fun HomeSearchBar(
     query: String = "",
     onQueryChange: (String) -> Unit = {},
     focusRequester: FocusRequester? = null,
+    haze: HazeState? = null,
     onClick: () -> Unit = {},
 ) {
     val motion = LocalSearchMotion.current
@@ -51,7 +57,7 @@ fun HomeSearchBar(
         modifier = Modifier
             .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp)
             .fillMaxWidth()
-            .height(48.dp)
+            .height(SearchFieldHeight)
             .onGloballyPositioned {
                 bounds.value = Rect(it.positionInRoot(), it.size.toSize())
             }
@@ -73,8 +79,9 @@ fun HomeSearchBar(
                     onClick()
                 },
             ))
-            .clip(RoundedCornerShape(Radii.field))
-            .background((if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage)),
+            .then(if (haze != null) Modifier.floatingSurface(RoundedCornerShape(Radii.field), haze)
+                else Modifier.clip(RoundedCornerShape(Radii.field))
+                    .background(if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage)),
     ) {
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(44.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {

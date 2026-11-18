@@ -143,10 +143,7 @@ fun AttachPanelBody(
             if (tab == 0) PhotoGrid(onSend = onSendPhotos, onOpenSystemPicker = onPickPhotos, onOpenCamera = onOpenCamera)
             else FilesTab(onPickFiles, onPickGalleryFiles.takeIf { allowPhotos })
         }
-        if (allowPhotos && allowFiles) GlassTabBar(local, Modifier.align(Alignment.BottomCenter)) {
-            GlassTab("Gallery", R.drawable.oi_image, tab == 0) { tab = 0 }
-            GlassTab("Files", R.drawable.oi_file_attachment, tab == 1) { tab = 1 }
-        }
+        if (allowPhotos && allowFiles) GlassTabBar(local, AttachTabs, tab, { tab = it }, Modifier.align(Alignment.BottomCenter))
     }
 }
 
@@ -163,3 +160,5 @@ private fun FilesTab(onBrowse: () -> Unit, onGalleryFiles: (() -> Unit)?) {
         }
     }
 }
+
+private val AttachTabs = listOf(GlassTabItem("Gallery", R.drawable.oi_image), GlassTabItem("Files", R.drawable.oi_file_attachment))
