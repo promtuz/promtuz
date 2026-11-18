@@ -166,6 +166,101 @@ pub fn send_message(
     Ok(())
 }
 
+#[derive(uniffi::Record)]
+pub struct ForwardOrigin {
+    pub dispatch_id: Vec<u8>,
+    pub from: String,
+}
+
+#[uniffi::export]
+pub fn forward_origins(conversation_id: Vec<u8>) -> Result<Vec<ForwardOrigin>, CoreError> {
+    let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    crate::privacy::require_access(&conv)?;
+    Ok(Message::forward_origins(&conv)?
+        .into_iter()
+        .map(|(dispatch_id, from)| ForwardOrigin { dispatch_id, from })
+        .collect())
+}
+
+/// Copies the messages in order into every target, then sends `comment`. Nothing is saved unless
+/// all of them can go: an attachment must be on this device.
+#[uniffi::export]
+pub fn forward_messages(
+    source_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>, target_ids: Vec<Vec<u8>>, comment: String,
+) -> Result<(), CoreError> {
+    Ok(forward(source_id, dispatch_ids, target_ids, comment)?)
+}
+
+fn forward(
+    source_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>, target_ids: Vec<Vec<u8>>, comment: String,
+) -> anyhow::Result<()> {
+    use anyhow::{anyhow, ensure};
+    let source = fixed::<16>(&source_id, "conversation id")?;
+    crate::privacy::require_access(&source)?;
+    let targets = target_ids.iter().map(|t| fixed::<16>(t, "conversation id")).collect::<Result<Vec<_>, _>>()?;
+    let me = crate::data::identity::Identity::local_ipk().ok_or_else(|| anyhow!("identity not found"))?;
+    let locked_source = crate::privacy::is_private(&source);
+    let mut items = Vec::new();
+    for d in &dispatch_ids {
+        let did = fixed::<16>(d, "dispatch_id")?;
+        let msg = Message::get_live(&source, &did).ok_or_else(|| anyhow!("That message is gone"))?;
+        let (content, mut media) =
+            crate::messaging::body::split_body(crate::messaging::body::stored_body(&source, &msg)?);
+        let mut file = false;
+        if let Some(m) = &mut media {
+            if let Some(f) = m.file_id.as_deref().and_then(|f| <[u8; 32]>::try_from(f).ok()) {
+                ensure!(!locked_source, "Files from a locked chat can't be forwarded");
+                ensure!(crate::transfer::retain_for_forward(&f)?, "Download the file before forwarding it");
+                file = true;
+            }
+            if m.hd.as_ref().is_some_and(|hd| locked_source || !crate::transfer::retain_for_forward(&hd.file_id).unwrap_or(false)) {
+                m.hd = None;
+            }
+        }
+        let origin = match Message::forwarded_from(&source, &did)? {
+            Some(from) => from,
+            None => match msg.inner.sender(&me) {
+                who if who == me => crate::api::profile::profile_name(),
+                who => crate::data::peer_name::named(&who).map(|n| n.0).unwrap_or_default(),
+            },
+        };
+        items.push((content, media, origin, file));
+    }
+    ensure!(!items.is_empty() && !targets.is_empty(), "Nothing to forward");
+    for t in &targets {
+        crate::privacy::require_access(t)?;
+        ensure!(!crate::privacy::is_private(t) || !items.iter().any(|i| i.3), "Files can't be forwarded into a locked chat");
+    }
+    for to in targets {
+        let mut saved = Vec::new();
+        let mut albums = std::collections::HashMap::new();
+        for (content, media, origin, _) in &items {
+            let mut media = media.clone();
+            if let Some(m) = &mut media
+                && let Some(g) = m.group_id.take()
+            {
+                m.group_id = Some(albums.entry(g).or_insert_with(|| crate::data::message::next_dispatch_id().to_vec()).clone());
+            }
+            saved.push(crate::data::media::save_outgoing_full(&to, content, None, media.as_ref(), Some(origin))?);
+        }
+        if !comment.trim().is_empty() {
+            saved.push(Message::save_outgoing(to, comment.trim(), None)?);
+        }
+        core().spawn(async move {
+            for msg in saved {
+                let sent = async {
+                    let payload = crate::messaging::body::rebuild_pending_payload(&to, &msg)?;
+                    crate::messaging::send_prepared(to, &msg, payload).await
+                };
+                if let Err(e) = sent.await {
+                    log::debug!("FORWARD: message remains pending: {e}");
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
 /// Edit text or a media caption, preserving its body. Local validation and
 /// persistence finish before returning; propagation to peers is asynchronous.
 #[uniffi::export]
@@ -175,6 +270,9 @@ pub fn edit_message(
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     crate::privacy::require_access(&conv)?;
     let target = fixed::<16>(&dispatch_id, "dispatch_id")?;
+    if Message::forwarded_from(&conv, &target)?.is_some() {
+        return Err(anyhow::anyhow!("A forwarded message can't be edited").into());
+    }
     let body = crate::messaging::text_edit_body(&conv, &target, content)?;
     let applied = crate::messaging::body::apply_revise_body(&conv, &target, body.clone(), true, None)?;
     let (row, content) = applied.ok_or_else(|| anyhow::anyhow!("message cannot be edited"))?;
@@ -890,4 +988,35 @@ pub async fn leave_group(conversation_id: Vec<u8>) -> Result<(), CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
     crate::privacy::require_access(&conv)?;
     on_runtime(crate::groups::leave(conv)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use common::proto::mls_wire::{AppPayload, Body};
+    use common::proto::pack::{Packer, Unpacker};
+
+    use crate::data::conversation::Conversation;
+    use crate::data::message::Message;
+    use crate::test_support::ScopedCore;
+    use crate::test_support::data::identity;
+
+    #[tokio::test]
+    async fn a_forward_of_a_forward_still_names_the_original_author() {
+        let scope = ScopedCore::new();
+        let me = identity(&scope.core.db.identity().lock(), 7).verifying_key().to_bytes();
+        let (bob, carol) = ([2; 32], [3; 32]);
+        let from_bob = Conversation::join_group(&bob, &[bob, me]).unwrap();
+        let to_carol = Conversation::join_group(&carol, &[carol, me]).unwrap();
+        let original = AppPayload::Forward { from: "Dana".into(), body: Body::Text("hi".into()) };
+        crate::messaging::receive::receive_application_content(from_bob, bob, [9; 16], 1_000, &original.ser().unwrap())
+            .unwrap();
+        assert_eq!(Message::forward_origins(&from_bob).unwrap(), vec![(vec![9; 16], "Dana".to_string())]);
+
+        super::forward(from_bob.to_vec(), vec![vec![9; 16]], vec![to_carol.to_vec()], String::new()).unwrap();
+        let inner = Message::get_messages(&to_carol, 10, "").pop().unwrap();
+        let did = inner.dispatch_id.clone();
+        let payload = crate::messaging::body::rebuild_pending_payload(&to_carol, &Message { inner }).unwrap();
+        assert_eq!(AppPayload::deser(&payload).unwrap(), original);
+        assert!(super::edit_message(to_carol.to_vec(), did, "changed".into()).is_err());
+    }
 }

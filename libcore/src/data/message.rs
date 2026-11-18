@@ -1,4 +1,5 @@
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 use common::utils::now_secs;
 use ulid::Ulid;
 
@@ -153,6 +154,50 @@ impl Message {
         )
         .ok()
         .map(|inner| Self { inner })
+    }
+
+    /// Any live, non-system message, either direction.
+    pub fn get_live(conversation_id: &[u8; 16], dispatch_id: &[u8; 16]) -> Option<Self> {
+        let conn = core().db.messages().lock();
+        conn.query_row(
+            "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2 AND deleted = 0 AND system = 0",
+            (conversation_id.as_slice(), dispatch_id.as_slice()),
+            MessageRow::from_row,
+        )
+        .ok()
+        .map(|inner| Self { inner })
+    }
+
+    pub fn forwarded_from(conversation_id: &[u8; 16], dispatch_id: &[u8]) -> Result<Option<String>> {
+        let conn = core().db.messages().lock();
+        let from: Option<String> = conn.query_row(
+            "SELECT forwarded_from FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
+            (conversation_id.as_slice(), dispatch_id),
+            |r| r.get(0),
+        ).optional()?.flatten();
+        from.map(|f| crate::privacy::open_text_if_sealed(conversation_id, f)).transpose()
+    }
+
+    pub fn forward_origins(conversation_id: &[u8; 16]) -> Result<Vec<(Vec<u8>, String)>> {
+        let rows: Vec<(Vec<u8>, String)> = all(
+            &core().db.messages().lock(),
+            "SELECT dispatch_id, forwarded_from FROM messages WHERE conversation_id = ?1 AND forwarded_from IS NOT NULL",
+            [conversation_id.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        rows.into_iter()
+            .map(|(d, f)| Ok((d, crate::privacy::open_text_if_sealed(conversation_id, f)?)))
+            .collect()
+    }
+
+    pub fn set_forwarded_tx(
+        conn: &rusqlite::Connection, conversation_id: &[u8; 16], dispatch_id: &[u8], from: &str,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE messages SET forwarded_from = ?3 WHERE conversation_id = ?1 AND dispatch_id = ?2",
+            (conversation_id.as_slice(), dispatch_id, crate::privacy::seal_tx(conn, conversation_id, from)?),
+        )?;
+        Ok(())
     }
 
     /// Fail unaccepted recipients without overwriting anyone's receipt.

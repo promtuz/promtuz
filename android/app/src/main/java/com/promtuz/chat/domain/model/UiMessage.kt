@@ -20,6 +20,8 @@ data class UiMessage(
     val timestampMs: Long,
     val reactions: List<ReactionGroup>,
     val quote: Quote? = null,
+    /** Who wrote the original, for a message copied from another chat. Blank when unknown. */
+    val forwardedFrom: String? = null,
 )
 
 /** [text] is null when the quoted message isn't loaded or was hard-deleted. */

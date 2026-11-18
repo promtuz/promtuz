@@ -62,6 +62,7 @@ struct Suffixes {
     receipts: crate::data::receipts::Backup,
     preparations: Vec<crate::data::media::PreparationBackup>,
     private_history: Vec<crate::data::private_backup::History>,
+    forwards: Vec<(Vec<u8>, Vec<u8>, String)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,8 +94,8 @@ fn backup_key(isk: &[u8; 32]) -> [u8; 32] {
 }
 
 fn encode(key: &[u8; 32], payload: &BackupPayload, suffixes: &Suffixes) -> Result<Vec<u8>> {
-    let Suffixes { stickers, avatar, groups, receipts, preparations, private_history } = suffixes;
-    let plain = postcard::to_allocvec(&(payload, stickers, avatar, groups, receipts, preparations, private_history))
+    let Suffixes { stickers, avatar, groups, receipts, preparations, private_history, forwards } = suffixes;
+    let plain = postcard::to_allocvec(&(payload, stickers, avatar, groups, receipts, preparations, private_history, forwards))
         .map_err(|e| anyhow!("encode: {e}"))?;
     let compressed = lz4_flex::compress_prepend_size(&plain);
     drop(plain);
@@ -150,6 +151,7 @@ fn split(plain: &[u8]) -> Result<(BackupPayload, Suffixes)> {
         receipts: next(&mut rest, "receipts")?,
         preparations: next(&mut rest, "media preparations")?,
         private_history: next(&mut rest,"private history")?,
+        forwards: next(&mut rest, "forwards")?,
     };
     Ok((payload, suffixes))
 }
@@ -210,6 +212,10 @@ fn export_from(db: &Stores, key: &[u8; 32]) -> Result<Vec<u8>> {
         receipts: crate::data::receipts::dump_tx(&conn)?,
         preparations: crate::data::media::dump_preparations_tx(&conn)?,
         private_history: crate::data::private_backup::dump(&conn)?,
+        forwards: crate::db::all(&conn,
+            "SELECT conversation_id, dispatch_id, forwarded_from FROM messages WHERE forwarded_from IS NOT NULL
+               AND conversation_id NOT IN (SELECT conversation_id FROM private_conversations)",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?,
     };
     drop(conn);
     encode(key, &payload, &suffixes)
@@ -267,6 +273,10 @@ fn import_into(
     let conversations =
         Conversation::import_rows_tx(&tx, &payload.conversations, &payload.members)?;
     let messages = Message::import_rows_tx(&tx, &payload.messages)?;
+    for (conv, did, from) in &suffixes.forwards {
+        tx.execute("UPDATE messages SET forwarded_from=?3 WHERE conversation_id=?1 AND dispatch_id=?2 AND forwarded_from IS NULL",
+            (conv, did, from))?;
+    }
     let reactions = Reaction::import_rows_tx(&tx, &payload.reactions, replace)?;
     let media = crate::data::media::import_rows_tx(&tx, &payload.media)?;
     crate::data::media::import_sticker_refs_tx(&tx, &suffixes.stickers.0)?;

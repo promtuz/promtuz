@@ -392,7 +392,9 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                 haze = menuHaze,
                 anchorOffsetY = { stage.pinnedOffsetY },
                 actionGroups = menuActionsFor(anchor.msg, viewModel,
-                    onDelete = { confirmDelete = it.deleteTargets() }, onInfo = { pendingInfo = it }) { menu.close() },
+                    onDelete = { confirmDelete = it.deleteTargets() }, onInfo = { pendingInfo = it },
+                    onForward = { appVM.navigator.push(Routes.Forward(viewModel.conversationHex,
+                        it.deleteTargets().ids, forwardSummary(it, routeName))) }) { menu.close() },
             )
         }
 
@@ -438,6 +440,31 @@ private class PendingDelete(val ids: List<String>, val outgoing: Boolean)
 private fun UiMessage.deleteTargets() =
     PendingDelete((content as? MessageContent.Album)?.items?.map { it.dispatchIdHex } ?: listOf(dispatchIdHex), outgoing)
 
+/** A file goes on only from this device's copy, and never out of a locked chat. */
+private fun UiMessage.forwardable(conversation: String): Boolean {
+    val locked = com.promtuz.chat.security.PrivateChatSession.active.value == conversation
+    fun ok(c: MessageContent): Boolean = when (c) {
+        is MessageContent.Attachment -> !locked && (outgoing || c.localPath != null)
+        is MessageContent.Album -> c.items.all { ok(it.content) }
+        is MessageContent.System, is MessageContent.Call -> false
+        else -> true
+    }
+    return ok(content)
+}
+
+private fun forwardSummary(msg: UiMessage, chatName: String): String {
+    val what = when (val c = msg.content) {
+        is MessageContent.Album -> "${c.items.size} photos"
+        is MessageContent.Image -> "A photo"
+        is MessageContent.Attachment -> if (c.mime.startsWith("video/")) "A video" else "A file"
+        is MessageContent.Voice -> "A voice message"
+        is MessageContent.Sticker -> "A sticker"
+        else -> "A message"
+    }
+    val from = msg.forwardedFrom?.takeIf { it.isNotBlank() } ?: if (msg.outgoing) "you" else msg.senderName ?: chatName
+    return "$what from $from"
+}
+
 private val QuickReactions = listOf("❤️", "👍", "👎", "😂", "🔥", "😢")
 
 @Composable
@@ -446,6 +473,7 @@ private fun menuActionsFor(
     viewModel: ChatVM,
     onDelete: (UiMessage) -> Unit,
     onInfo: (UiMessage) -> Unit,
+    onForward: (UiMessage) -> Unit,
     close: () -> Unit,
 ): List<List<MenuAction>> {
     val clipboard = LocalClipboard.current
@@ -473,8 +501,10 @@ private fun menuActionsFor(
                 }
                 close()
             })
+        if (actionable && msg.forwardable(viewModel.conversationHex))
+            add(MenuAction("Forward", R.drawable.oi_forward) { onForward(msg); close() })
         // A voice note or a sticker has no text to edit and nothing to swap in for it.
-        if (actionable && msg.outgoing && msg.content !is MessageContent.Voice && msg.content !is MessageContent.Sticker)
+        if (actionable && msg.outgoing && msg.forwardedFrom == null && msg.content !is MessageContent.Voice && msg.content !is MessageContent.Sticker)
             add(MenuAction("Edit", R.drawable.oi_edit) {
             viewModel.beginEdit(msg); close()
         })

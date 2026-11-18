@@ -225,7 +225,8 @@ pub(super) async fn send_payload<C: DhtClient>(
     let id: [u8; 16] = msg.inner.dispatch_id.as_slice().try_into().expect("dispatch_id is 16 bytes");
 
     let sharing = match AppPayload::deser(&payload_bytes) {
-        Ok(AppPayload::Post { body: Body::Attachment { file_id, size, .. }, .. }) => {
+        Ok(AppPayload::Post { body: Body::Attachment { file_id, size, .. }, .. }
+            | AppPayload::Forward { body: Body::Attachment { file_id, size, .. }, .. }) => {
             crate::transfer::sharing::for_outgoing(
                 &conversation,
                 &group.group_id(),

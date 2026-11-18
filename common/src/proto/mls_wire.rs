@@ -132,6 +132,11 @@ pub enum AppPayload {
         history: Vec<u8>,
     },
     Media(crate::proto::media::MediaUpdate),
+    /// A post copied from another chat. `from` names who wrote the original, as the forwarder knew them.
+    Forward {
+        from: String,
+        body: Body,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

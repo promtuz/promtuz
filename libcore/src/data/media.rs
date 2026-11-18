@@ -291,18 +291,31 @@ pub fn save_incoming_with_media(
 pub fn save_outgoing_with_media(
     conv: &[u8; 16], caption: &str, reply_to: Option<[u8; 16]>, r: &MediaRow,
 ) -> Result<crate::data::message::Message> {
+    save_outgoing_full(conv, caption, reply_to, Some(r), None)
+}
+
+pub fn save_outgoing_full(
+    conv: &[u8; 16], caption: &str, reply_to: Option<[u8; 16]>, r: Option<&MediaRow>,
+    forwarded: Option<&str>,
+) -> Result<crate::data::message::Message> {
     crate::privacy::require_access(conv)?;
     let me = crate::data::identity::Identity::local_ipk();
     let mut db = core().db.messages().lock();
     let tx = db.transaction()?;
     let msg = crate::data::message::Message::save_outgoing_tx(&tx, *conv, caption, reply_to, me)?;
     let did: [u8; 16] = msg.inner.dispatch_id.as_slice().try_into().expect("dispatch_id is 16 bytes");
-    save_tx(&tx, conv, &did, r)?;
-    if r.kind == KIND_ATTACHMENT {
-        tx.execute("INSERT INTO attachment_sharing_intents (message_id) VALUES (?1)",
-            [msg.inner.id.to_string()])?;
+    if let Some(r) = r {
+        save_tx(&tx, conv, &did, r)?;
+        if r.kind == KIND_ATTACHMENT {
+            tx.execute("INSERT INTO attachment_sharing_intents (message_id) VALUES (?1)",
+                [msg.inner.id.to_string()])?;
+        }
+    }
+    if let Some(from) = forwarded {
+        crate::data::message::Message::set_forwarded_tx(&tx, conv, &did, from)?;
     }
     tx.commit()?;
+    let Some(r) = r else { return Ok(msg) };
     if crate::privacy::is_private_tx(&db,conv)? { crate::private_files::cleanup_plaintext_tx(&db)?; }
     else { for file in row_file_ids(r) { crate::private_files::publish_ordinary(&file)?; } }
     Ok(msg)

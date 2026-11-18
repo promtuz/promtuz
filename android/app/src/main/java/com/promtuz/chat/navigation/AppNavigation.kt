@@ -91,6 +91,7 @@ fun AppNavigation(
             entry<Routes.ContactInfo> { key -> ContactInfoScreen(key.conversation, key.peer) }
             entry<Routes.PersonInfo> { key -> ContactInfoScreen(null, key.peer, key.name) }
             entry<Routes.SharedMedia> { key -> SharedMediaScreen(key.conversation, key.name) }
+            entry<Routes.Forward> { key -> com.promtuz.chat.ui.screens.ForwardScreen(key, appViewModel) }
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
             entry<Routes.GroupSettings> { key -> GroupSettingsScreen(key.conversation) }
             entry<Routes.ShareIdentity> {

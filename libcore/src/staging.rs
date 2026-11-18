@@ -305,10 +305,16 @@ pub(crate) fn stage_source_attachment(mut source:crate::media::ports::SourceLeas
     retain_staged(staged,path,manifest,binding)
 }
 
-/// Items leave the buffer as they commit, so a partial failure does not re-send what already went.
-/// The caption rides the first item and `reply_to` rides all of them.
+/// Items leave the buffer as they commit to the last chat, so a partial failure there does not
+/// re-send what already went. The caption rides the first item and `reply_to` rides all of them.
 pub async fn commit(
     conversation: [u8; 16], ids: Vec<u64>, caption: String, reply_to: Option<[u8; 16]>,
+) -> Result<()> {
+    commit_all(&[conversation], ids, caption, reply_to)
+}
+
+pub fn commit_all(
+    conversations: &[[u8; 16]], ids: Vec<u64>, caption: String, reply_to: Option<[u8; 16]>,
 ) -> Result<()> {
     if ids.is_empty() {
         bail!("nothing staged");
@@ -323,13 +329,24 @@ pub async fn commit(
         bail!("staged item {} is not ready ({})", s.id, s.error.as_deref().unwrap_or("preparing"));
     }
 
-    crate::privacy::require_access(&conversation)?;
-    for item in &staged {
-        if let Some((conv,generation))=item.privacy {
-            anyhow::ensure!(conv==conversation,"This media belongs to another chat");
-            anyhow::ensure!(generation==core().private_generation.load(Ordering::SeqCst),"Chat is locked");
+    for conversation in conversations {
+        crate::privacy::require_access(conversation)?;
+        for item in &staged {
+            if let Some((conv,generation))=item.privacy {
+                anyhow::ensure!(conv==*conversation,"This media belongs to another chat");
+                anyhow::ensure!(generation==core().private_generation.load(Ordering::SeqCst),"Chat is locked");
+            }
         }
     }
+    for (i, &conversation) in conversations.iter().enumerate() {
+        commit_to(conversation, &staged, &caption, reply_to, i + 1 == conversations.len())?;
+    }
+    Ok(())
+}
+
+fn commit_to(
+    conversation: [u8; 16], staged: &[Staged], caption: &str, reply_to: Option<[u8; 16]>, last: bool,
+) -> Result<()> {
     // A lone item gets no group id, so it renders as a single photo, not a one-member album.
     let group_id: Option<[u8; 16]> = (staged.len() > 1).then(|| {
         use ed25519_dalek::ed25519::signature::rand_core::OsRng;
@@ -342,10 +359,12 @@ pub async fn commit(
 
     for (i, s) in staged.iter().enumerate() {
         let media = s.media_row(group_id).ok_or_else(|| anyhow!("staged item {} not ready", s.id))?;
-        let cap = if i == 0 { caption.as_str() } else { "" };
+        let cap = if i == 0 { caption } else { "" };
         let msg =
             crate::data::media::save_outgoing_with_media(&conversation, cap, reply_to, &media)?;
-        discard(s.id);
+        if last {
+            discard(s.id);
+        }
         let payload = crate::messaging::body::rebuild_pending_payload(&conversation, &msg)?;
         // The durable message owns it now; a network failure must not stop the rest of the album.
         core().spawn(async move {

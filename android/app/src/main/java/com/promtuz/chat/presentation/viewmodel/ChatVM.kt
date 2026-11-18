@@ -455,6 +455,7 @@ class ChatVM(
         val rows = CoreBridge.messages(conversation, want)                   // oldest-first
         exhausted = rows.size < want
         val byMsg = CoreBridge.reactions(conversation).groupBy { it.dispatchId.toHex() }
+        val forwards = CoreBridge.forwardOrigins(conversation).associate { it.dispatchId.toHex() to it.from }
         val media = CoreBridge.getMedia(conversation, want).map { it.copy(localPath = com.promtuz.chat.utils.media.PrivateMediaAccess.path(conversationHex, it)) }.associateBy { it.dispatchId.toHex() }
         // Quotes resolve within the loaded window; one outside it shows as unavailable.
         val byDid = rows.associateBy { it.dispatchId.toHex() }
@@ -467,7 +468,7 @@ class ChatVM(
                 .map {
                     currentCoroutineContext().ensureActive()
                     it.toUi(byMsg, byDid, media, _memberNames.value, _isGroup.value,
-                        cacheImages = cacheImages)
+                        cacheImages = cacheImages).copy(forwardedFrom = forwards[it.dispatchId.toHex()])
                 }
         }
         // A date/search jump can widen the window while this read is decoding.

@@ -233,6 +233,23 @@ pub fn prepare_send(
     Ok((file_id, size))
 }
 
+/// Keeps a file we sent or received servable for a week so a forward can offer it again. False
+/// when we hold no complete copy.
+pub fn retain_for_forward(file_id: &[u8; 32]) -> anyhow::Result<bool> {
+    let expires = now_secs() + 7 * 24 * 3600;
+    let db = core().db.transfers().lock();
+    if let Some(old) = store::retention_get_tx(&db, file_id)
+        && std::path::Path::new(&old.path).exists()
+    {
+        store::retention_put_tx(&db, file_id, &old.path, old.size, old.chunk_size, &old.manifest, old.expires_at.max(expires))?;
+        return Ok(true);
+    }
+    let Some(p) = store::partial_get_tx(&db, file_id).filter(|p| p.is_complete()) else { return Ok(false) };
+    let Some(manifest) = p.manifest else { return Ok(false) };
+    store::retention_put_tx(&db, file_id, &p.path, p.total, p.chunk_size, &manifest, expires)?;
+    Ok(true)
+}
+
 /// Every stream starts with the mutual [`auth`] handshake; one that fails is dropped before any
 /// pull is read.
 pub async fn serve_link(link: crate::p2p::PeerLink) {

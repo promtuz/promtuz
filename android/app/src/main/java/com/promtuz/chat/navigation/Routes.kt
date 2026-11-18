@@ -17,6 +17,10 @@ object Routes : NavKey {
     @Serializable
     data class Chat(val conversation: String, val name: String, val sessionId: Long? = null) : NavKey
 
+    /** `dispatchIds` are hex, oldest first. */
+    @Serializable
+    data class Forward(val conversation: String, val dispatchIds: List<String>, val summary: String) : NavKey
+
     @Serializable
     data class GroupInfo(val conversation: String) : NavKey
 

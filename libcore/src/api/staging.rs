@@ -123,22 +123,23 @@ pub fn revise_with_staged(
 
 /// Share sheet waits for durable message creation before releasing its staged files.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn commit_shared(conversation_id: Vec<u8>, ids: Vec<u64>, caption: String) -> Result<(), CoreError> {
-    let to = fixed::<16>(&conversation_id, "conversation id")?;
+pub async fn commit_shared(conversation_ids: Vec<Vec<u8>>, ids: Vec<u64>, caption: String) -> Result<(), CoreError> {
+    let to = conversation_ids.iter().map(|c| fixed::<16>(c, "conversation id")).collect::<Result<Vec<_>, _>>()?;
     crate::api::messaging::on_runtime(async move {
-        if ids.is_empty() {
-            anyhow::ensure!(!caption.trim().is_empty(), "nothing to share");
-            let message = crate::data::message::Message::save_outgoing(to, &caption, None)?;
-            let payload = crate::messaging::body::rebuild_pending_payload(&to, &message)?;
+        if !ids.is_empty() {
+            return crate::staging::commit_all(&to, ids, caption, None);
+        }
+        anyhow::ensure!(!caption.trim().is_empty(), "nothing to share");
+        for conv in to {
+            let message = crate::data::message::Message::save_outgoing(conv, &caption, None)?;
+            let payload = crate::messaging::body::rebuild_pending_payload(&conv, &message)?;
             core().spawn(async move {
-                if let Err(e) = crate::messaging::send_prepared(to, &message, payload).await {
+                if let Err(e) = crate::messaging::send_prepared(conv, &message, payload).await {
                     log::debug!("SHARE: text remains pending: {e}");
                 }
             });
-            Ok(())
-        } else {
-            crate::staging::commit(to, ids, caption, None).await
         }
+        Ok(())
     })
     .await
 }

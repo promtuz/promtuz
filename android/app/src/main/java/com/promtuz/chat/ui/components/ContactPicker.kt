@@ -106,18 +106,25 @@ fun ContactPicker(
 
 @Composable
 private fun SelectableContactAvatar(name: String, ipkHex: String, selecting: Boolean, selected: Boolean) {
+    SelectableAvatar(selected, 48.dp, 44.dp) { Avatar(name, size = 44.dp, identityKey = ipkHex, image = rememberAvatar(ipkHex)) }
+}
+
+/** An avatar that shrinks a little and takes a check badge while selected. */
+@Composable
+fun SelectableAvatar(selected: Boolean, size: Dp, avatarSize: Dp, avatar: @Composable () -> Unit) {
     val scale by animateFloatAsState(if (selected) 0.94f else 1f, spring(), label = "selected avatar")
     val check by animateFloatAsState(if (selected) 1f else 0f, spring(), label = "contact check")
     val fill by animateColorAsState(if (selected) Promtuz.colors.accentFill else Promtuz.colors.cardHigh,
         ChatMotion.spec(), label = "contact selection fill")
-    Box(Modifier.size(48.dp)) {
-        Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { Avatar(name, size = 44.dp, identityKey = ipkHex, image = rememberAvatar(ipkHex)) }
+    val badge = if (avatarSize > 48.dp) 22.dp else 20.dp
+    Box(Modifier.size(size)) {
+        Box(Modifier.align(Alignment.Center).graphicsLayer { scaleX = scale; scaleY = scale }) { avatar() }
         AnimatedVisibility(selected, Modifier.align(Alignment.BottomEnd),
             enter = fadeIn(ChatMotion.spec()) + scaleIn(spring(), initialScale = 0.4f),
             exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.4f)) {
-            Box(Modifier.size(20.dp).clip(CircleShape).background(fill).border(2.dp, Promtuz.colors.page, CircleShape),
+            Box(Modifier.size(badge).clip(CircleShape).background(fill).border(2.dp, Promtuz.colors.page, CircleShape),
                 contentAlignment = Alignment.Center) {
-                MorphIcon(MorphGlyph.Check, null, Modifier.size(10.dp).graphicsLayer {
+                MorphIcon(MorphGlyph.Check, null, Modifier.size(badge / 2).graphicsLayer {
                     alpha = check; scaleX = check; scaleY = check
                 }, tint = Color.White, strokeWidth = 1.25.dp)
             }

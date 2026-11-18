@@ -28,6 +28,10 @@ import com.promtuz.chat.ui.text.MessageText
 import com.promtuz.chat.ui.text.MessageLinkGestures
 import com.promtuz.chat.ui.text.LocalMessageLinkGestures
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import com.promtuz.chat.R
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -105,6 +109,7 @@ fun MessageBubble(
     val chat = LocalChatColors.current
     val outgoing = msg.outgoing
     val showSender = msg.senderName != null && !outgoing && !mergedTop
+    val forwardedFrom = msg.forwardedFrom?.takeIf { !msg.deleted }
     val groupIncoming = msg.senderName != null && !outgoing
     val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
@@ -118,9 +123,9 @@ fun MessageBubble(
     val isTextBlock = msg.deleted || msg.content is MessageContent.Text
 
     // Emoji and stickers omit the bubble unless a quote needs it.
-    val jumboEmoji = !msg.deleted && msg.quote == null &&
+    val jumboEmoji = !msg.deleted && msg.quote == null && forwardedFrom == null &&
         (msg.content as? MessageContent.Text)?.let { isJumboEmoji(it.text) } == true
-    val bare = jumboEmoji || (!msg.deleted && msg.quote == null &&
+    val bare = jumboEmoji || (!msg.deleted && msg.quote == null && forwardedFrom == null &&
         msg.content is MessageContent.Sticker)
 
     // A picture runs to the bubble's edge, so the bubble waives its inset and the padded
@@ -135,7 +140,7 @@ fun MessageBubble(
         else -> ""
     }
     // With nothing below it to sit in, the time has to ride the picture itself.
-    val stickerAlone = !msg.deleted && msg.quote == null && msg.content is MessageContent.Sticker
+    val stickerAlone = !msg.deleted && msg.quote == null && forwardedFrom == null && msg.content is MessageContent.Sticker
     val metaOnMedia = (bleeds || stickerAlone) && caption.isEmpty() && msg.reactions.isEmpty()
     // A borderless picture has no body for a tail to grow from, so it goes without one.
     val shape = rememberBubbleShape(
@@ -165,15 +170,11 @@ fun MessageBubble(
         }
         Layout(
             content = {
-                if (showSender) {
-                    SenderLabel(
-                        msg.senderName ?: "Unknown",
-                        msg.senderHex,
-                        onClick = onSenderClick,
-                        modifier = if (bleeds)
-                            Modifier.padding(start = BubblePadH, end = BubblePadH, top = BubblePadV)
-                        else Modifier,
-                    )
+                if (showSender || forwardedFrom != null) Column(
+                    if (bleeds) Modifier.padding(start = BubblePadH, end = BubblePadH, top = BubblePadV) else Modifier,
+                ) {
+                    if (showSender) SenderLabel(msg.senderName ?: "Unknown", msg.senderHex, onClick = onSenderClick)
+                    if (forwardedFrom != null) ForwardedLabel(forwardedFrom, if (outgoing) textColor else chat.accent)
                 }
                 msg.quote?.let { q ->
                     QuoteBlock(
@@ -294,7 +295,7 @@ fun MessageBubble(
                 ),
         ) { measurables, constraints ->
             // Children: [sender?] [quote?] content [reactions?] meta.
-            val hasSender = showSender
+            val hasSender = showSender || forwardedFrom != null
             val hasQuote = msg.quote != null
             val hasReactions = msg.reactions.isNotEmpty()
             val cap = (constraints.maxWidth * widthFraction).toInt()
@@ -535,6 +536,22 @@ private class CoordsHolder {
 
     /** Last text layout, written during the text child's measure and read right after it. */
     var text: TextLayoutResult? = null
+}
+
+@Composable
+private fun ForwardedLabel(from: String, color: Color) {
+    Row(Modifier.padding(bottom = 2.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        DrawableIcon(R.drawable.i_forward, size = 14.dp, tint = color)
+        Text(
+            if (from.isBlank()) AnnotatedString("Forwarded") else buildAnnotatedString {
+                append("Forwarded from ")
+                withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(from) }
+            },
+            style = MaterialTheme.typography.labelMedium, color = color,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 @Composable

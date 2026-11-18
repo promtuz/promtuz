@@ -88,6 +88,9 @@ pub(crate) fn open_content(conv: &[u8; 16], content: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("invalid private message ciphertext"))?;
     Ok(String::from_utf8(open_bytes(conv, &hex::decode(cipher)?)?)?)
 }
+pub(crate) fn open_text_if_sealed(conv: &[u8; 16], text: String) -> Result<String> {
+    if text.starts_with(PREFIX) { open_content(conv, &text) } else { Ok(text) }
+}
 pub(crate) fn ids_tx(conn: &Connection) -> Result<Vec<[u8; 16]>> {
     Ok(crate::db::all(conn, "SELECT conversation_id FROM private_conversations", [], |r| r.get(0))?)
 }
@@ -126,16 +129,17 @@ pub(crate) fn hide(conv: &[u8; 16], code: &str) -> Result<()> {
             is_pin(code)
         ],
     )?;
-    let messages: Vec<(String, String)> = crate::db::all(
+    let messages: Vec<(String, String, Option<String>)> = crate::db::all(
         &tx,
-        "SELECT id,content FROM messages WHERE conversation_id=?1",
+        "SELECT id,content,forwarded_from FROM messages WHERE conversation_id=?1",
         [conv],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    for (id, plain) in messages {
+    for (id, plain, from) in messages {
+        let from = from.map(|f| seal_tx(&tx, conv, &f)).transpose()?;
         tx.execute(
-            "UPDATE messages SET content=?2 WHERE id=?1",
-            (&id, seal_tx(&tx, conv, &plain)?),
+            "UPDATE messages SET content=?2,forwarded_from=?3 WHERE id=?1",
+            (&id, seal_tx(&tx, conv, &plain)?, from),
         )?;
     }
     crate::data::media::privatize_tx(&tx, conv)?;
@@ -205,10 +209,11 @@ pub(crate) fn remove_lock(conv: &[u8; 16]) -> Result<()> {
     let encrypted = crate::private_files::publish_conversation(conv)?;
     let mut conn = core().db.messages().lock();
     let tx = conn.transaction()?;
-    let messages = crate::db::all(&tx, "SELECT id,content FROM messages WHERE conversation_id=?1", [conv],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+    let open = |v: String| if v.starts_with(PREFIX) { open_content(conv, &v) } else { Ok(v) };
+    let messages = crate::db::all(&tx, "SELECT id,content,forwarded_from FROM messages WHERE conversation_id=?1", [conv],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?
         .into_iter()
-        .map(|(id, content)| Ok((id.clone(), if content.starts_with(PREFIX) { open_content(conv, &content)? } else { content })))
+        .map(|(id, content, from)| Ok((id, open(content)?, from.map(open).transpose()?)))
         .collect::<Result<Vec<_>>>()?;
     let media = crate::data::media::snapshot_tx(&tx, conv)?;
     let grants = crate::transfer::sharing::snapshot_tx(&tx, conv)?;
@@ -224,8 +229,8 @@ pub(crate) fn remove_lock(conv: &[u8; 16]) -> Result<()> {
         .map(|value| if value.starts_with(PREFIX) { open_content(conv, &value) } else { Ok(value) })
         .transpose()?;
     tx.execute("DELETE FROM private_conversations WHERE conversation_id=?1", [conv])?;
-    for (id, content) in messages {
-        tx.execute("UPDATE messages SET content=?2 WHERE id=?1", (&id, &content))?;
+    for (id, content, from) in messages {
+        tx.execute("UPDATE messages SET content=?2,forwarded_from=?3 WHERE id=?1", (&id, &content, from))?;
     }
     crate::data::media::restore_tx(&tx, conv, media)?;
     crate::transfer::sharing::restore_tx(&tx, &grants)?;

@@ -415,8 +415,8 @@ object CoreBridge {
     /** Safe mid-encode: the running pass discards its result. */
     suspend fun discardStaged(id: ULong) = withContext(Dispatchers.IO) { ffiDiscardStaged(id) }
 
-    suspend fun commitShared(conversationId: ByteArray, ids: List<ULong>, caption: String) =
-        uniffi.core.commitShared(conversationId, ids, caption)
+    suspend fun commitShared(conversationIds: List<ByteArray>, ids: List<ULong>, caption: String) =
+        uniffi.core.commitShared(conversationIds, ids, caption)
 
     suspend fun stagedItems(): List<StagedRecord> = withContext(Dispatchers.IO) { ffiStagedItems() }
 
@@ -498,6 +498,12 @@ object CoreBridge {
 
     suspend fun reactions(conversationId: ByteArray): List<ReactionRecord> =
         withContext(Dispatchers.IO) { ffiReactionsFor(conversationId) }
+
+    suspend fun forwardOrigins(conversationId: ByteArray) =
+        withContext(Dispatchers.IO) { uniffi.core.forwardOrigins(conversationId) }
+
+    suspend fun forwardMessages(source: ByteArray, dispatchIds: List<ByteArray>, targets: List<ByteArray>, comment: String) =
+        withContext(Dispatchers.IO) { uniffi.core.forwardMessages(source, dispatchIds, targets, comment) }
 
     suspend fun messageReceiptInfo(conversationId: ByteArray, dispatchIds: List<ByteArray>) =
         withContext(Dispatchers.IO) { ffiMessageReceiptInfo(conversationId, dispatchIds) }

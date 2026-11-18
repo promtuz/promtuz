@@ -33,7 +33,7 @@ pub(crate) fn save_inbound_body(
 
 /// The text to surface and the media side row, if any. A sticker stores only its reference; the
 /// picture is fetched by it and cached under the pack.
-pub(super) fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
+pub(crate) fn split_body(body: Body) -> (String, Option<crate::data::media::MediaRow>) {
     use crate::data::media::KIND_ATTACHMENT;
     use crate::data::media::KIND_IMAGE;
     use crate::data::media::KIND_STICKER;
@@ -193,10 +193,14 @@ impl BodyKind {
 pub(crate) fn rebuild_pending_payload(conversation: &[u8; 16], msg: &Message) -> Result<Vec<u8>> {
     let reply_to = msg.inner.reply_to.as_deref().and_then(|r| r.try_into().ok());
     let body = stored_body(conversation, msg)?;
-    AppPayload::Post { reply_to, body }.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
+    let payload = match Message::forwarded_from(conversation, &msg.inner.dispatch_id)? {
+        Some(from) => AppPayload::Forward { from, body },
+        None => AppPayload::Post { reply_to, body },
+    };
+    payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))
 }
 
-pub(super) fn stored_body(conversation: &[u8; 16], msg: &Message) -> Result<Body> {
+pub(crate) fn stored_body(conversation: &[u8; 16], msg: &Message) -> Result<Body> {
     let did = msg.inner.dispatch_id.as_slice().try_into()
         .map_err(|_| anyhow!("invalid dispatch id"))?;
     let media = crate::data::media::get(conversation, &did)?;

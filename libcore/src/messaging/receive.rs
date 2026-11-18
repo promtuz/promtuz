@@ -593,7 +593,12 @@ pub(crate) fn receive_application_content(
             super::preparation::receive(conv, author, accepted_at_secs(accepted_at_ms), update)?;
         },
         Ok(AppPayload::GroupAdmins { .. }) => {},
-        Ok(AppPayload::Post { reply_to, body }) => {
+        Ok(payload @ (AppPayload::Post { .. } | AppPayload::Forward { .. })) => {
+            let (reply_to, body, forwarded) = match payload {
+                AppPayload::Post { reply_to, body } => (reply_to, body, None),
+                AppPayload::Forward { from, body } => (None, body, Some(from.trim().chars().take(64).collect::<String>())),
+                _ => unreachable!(),
+            };
             let did = dispatch_id;
             let timestamp = accepted_at_secs(accepted_at_ms);
             let auto = match &body {
@@ -615,6 +620,10 @@ pub(crate) fn receive_application_content(
                 &conv, &author, &did, timestamp, reply_to, body,
             ) {
                 Ok(Some((saved, content))) => {
+                    if let Some(from) = forwarded {
+                        let conn = core().db.messages().lock();
+                        crate::data::message::Message::set_forwarded_tx(&conn, &conv, &did, &from)?;
+                    }
                     MessageEv::Received {
                         id: saved.inner.id,
                         conversation: conv,

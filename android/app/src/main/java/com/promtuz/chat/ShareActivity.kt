@@ -6,6 +6,11 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Patterns
+import com.promtuz.chat.ui.screens.SendToScreen
+import com.promtuz.chat.ui.screens.SendToSubject
+import com.promtuz.chat.ui.screens.SubjectIconTile
+import com.promtuz.chat.ui.screens.SubjectThumbStack
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,10 +28,6 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.navigation3.runtime.NavBackStack
-import androidx.navigation3.runtime.NavKey
-import androidx.navigation3.runtime.entryProvider
-import com.promtuz.chat.navigation.NavStage
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.ui.theme.Promtuz
@@ -37,10 +38,6 @@ import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
-import kotlinx.serialization.Serializable
-
-@Serializable private data object ShareChoose : NavKey
-@Serializable private data class ShareReview(val conversation: String, val name: String) : NavKey
 
 /** Holds incoming URI grants for the entire choose/review flow, including rotation. */
 class ShareActivity : ComponentActivity() {
@@ -59,23 +56,19 @@ class ShareActivity : ComponentActivity() {
                         Text("Set up Promtuz before sharing.")
                         TextButton(onClick = { startActivity(Intent(this@ShareActivity, LauncherActivity::class.java)); finish() }) { Text("Open Promtuz") }
                     } }
-                } else NavStage(model.stack, onBack = { if (model.stack.size > 1) model.stack.removeLastOrNull() else finish() }, entryProvider = entryProvider {
-                    entry<ShareChoose> { ChooseShareRecipient(model) }
-                    entry<ShareReview> { key -> ReviewShare(model, key) { finish() } }
-                })
+                } else ShareScreen(model) { finish() }
                 }
             }
         }
     }
 }
 
-data class ShareRecipient(val conversation: String, val name: String, val group: Boolean, val peer: String?)
-
-private data class SharedPick(val id: ULong, val name: String, val preview: ImageBitmap?)
+internal data class SharedPick(val id: ULong, val name: String, val preview: ImageBitmap?)
 class IncomingShareVM(application: Application) : AndroidViewModel(application) {
-    val stack = NavBackStack<NavKey>(ShareChoose)
     var text by mutableStateOf("")
-    var query by mutableStateOf("")
+    /** A shared link stays whole on the bar; [text] is then the comment. */
+    var link by mutableStateOf<String?>(null)
+    val selected = mutableStateListOf<String>()
     var busy by mutableStateOf(false)
         private set
     var sending by mutableStateOf(false)
@@ -86,16 +79,11 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
     private var importJob: Job? = null
     private var sendJob: Job? = null
     private val owned = mutableStateListOf<SharedPick>()
-    private val removing = mutableStateListOf<ULong>()
     private val cleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val staged = observeQuery(setOf("staging")) { CoreBridge.stagedItems() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-    val recipients = observeQuery(setOf("contacts", "conversations", "conversation_members")) {
-        val contacts = CoreBridge.contacts().associateBy { it.ipk.toHex() }
-        CoreBridge.listConversations().filter { c -> !c.locked }.filter { c ->
-            if (c.kind.toInt() == 1) c.canSend else contacts[c.peer?.toHex()]?.status?.toInt() == 1
-        }.map { c -> ShareRecipient(c.id.toHex(), if (c.kind.toInt() == 1) c.displayName else contacts[c.peer?.toHex()]?.name.orEmpty(), c.kind.toInt() == 1, c.peer?.toHex()) }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val targets = com.promtuz.chat.ui.screens.sendTargets()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun receive(intent: Intent) {
         if (received) return
@@ -110,7 +98,11 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
         if (uris.any { it.scheme != "content" || it.authority == "${getApplication<Application>().packageName}.fileprovider" }) {
             error = "This app didn't provide a readable attachment"; return
         }
-        if (uris.isEmpty()) { if (text.isBlank()) error = "Nothing to share"; return }
+        if (uris.isEmpty()) {
+            if (text.isBlank()) error = "Nothing to share"
+            else if (text.trim().let { it.none(Char::isWhitespace) && Patterns.WEB_URL.matcher(it).matches() }) { link = text.trim(); text = "" }
+            return
+        }
         busy = true
         importJob = viewModelScope.launch {
             try {
@@ -135,51 +127,26 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun remove(id: ULong) {
-        if (busy || id in removing) return
-        removing += id
-        cleanup.launch(Dispatchers.Main.immediate) {
-            try {
-                withContext(NonCancellable) {
-                    CoreBridge.discardStaged(id)
-                    owned.removeAll { it.id == id }
-                }
-            } catch (_: Exception) {
-                error = "Couldn’t remove the attachment. Try again."
-            } finally { removing -= id }
-        }
-    }
+    internal val picks: List<SharedPick> get() = owned
 
-    @Composable fun Picks() {
-        val records by staged.collectAsState()
-        if (owned.isNotEmpty()) SettingsCard { owned.toList().forEach { pick ->
-            val state = records.firstOrNull { it.id == pick.id }
-            SettingsRow(pick.name,
-                subtitle = if (state?.state?.toInt() != 1) (if (state?.state?.toInt() == 2) "Couldn't prepare attachment" else "Preparing…") else null,
-                leading = pick.preview?.let { { Image(it, null, Modifier.size(48.dp)) } }, leadingSize = 48.dp,
-                trailingContent = { AppIconButton(R.drawable.oi_trash, "Remove attachment", { remove(pick.id) },
-                    enabled = !busy && pick.id !in removing, tint = Promtuz.colors.muted) })
-        } }
-    }
-
-    fun canSend(records: List<uniffi.core.StagedRecord>) = !busy && removing.isEmpty() && (text.isNotBlank() || owned.isNotEmpty()) &&
+    fun canSend(records: List<uniffi.core.StagedRecord>) = !busy && selected.isNotEmpty() &&
+        (text.isNotBlank() || link != null || owned.isNotEmpty()) &&
         owned.all { p -> records.any { it.id == p.id && it.state.toInt() == 1 } }
 
-    fun send(conversation: String, done: () -> Unit) {
+    fun send(done: () -> Unit) {
         if (!canSend(staged.value)) return
-        if (CoreBridge.privateConversationIds().any { it.contentEquals(conversation.fromHex()) }) {
-            error = "Open this chat through home search to send a message."
-            return
-        }
+        val to = selected.map { it.fromHex() }
         busy = true; sending = true; error = null
         sendJob = viewModelScope.launch {
             try {
-                if (owned.isEmpty()) withContext(NonCancellable) { CoreBridge.commitShared(conversation.fromHex(), emptyList(), text.trim()) }
+                if (owned.isEmpty()) withContext(NonCancellable) {
+                    CoreBridge.commitShared(to, emptyList(), listOfNotNull(text.trim().ifEmpty { null }, link).joinToString("\n"))
+                }
                 else {
                     for (chunk in owned.toList().chunked(10)) {
                         ensureActive()
                         withContext(NonCancellable) {
-                            try { CoreBridge.commitShared(conversation.fromHex(), chunk.map { it.id }, text.trim()) }
+                            try { CoreBridge.commitShared(to, chunk.map { it.id }, text.trim()) }
                             finally {
                                 val remaining = CoreBridge.stagedItems().map { it.id }.toSet()
                                 val committed = chunk.map { it.id }.filterNot { it in remaining }.toSet()
@@ -192,7 +159,7 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
                 done()
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) {
-                if (owned.isEmpty() && text.isEmpty()) done()
+                if (owned.isEmpty() && text.isEmpty() && link == null) done()
                 else error = "Couldn't send everything. You can retry the remaining items."
             } finally { busy = false; sending = false }
         }
@@ -212,36 +179,44 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
     }
 }
 
-@Composable private fun ChooseShareRecipient(model: IncomingShareVM) {
-    val recipients by model.recipients.collectAsState()
-    SimpleScreen({ Text("Share to…") }, connectionStatus = false) { padding ->
-        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
-            AppTextField(model.query, { model.query = it }, Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp),
-                placeholder = "Search chats", singleLine = true)
-            LazyColumn(contentPadding = PaddingValues(bottom = padding.calculateBottomPadding() + 16.dp)) {
-                if (recipients.isEmpty()) item { Text("No chats yet", Modifier.padding(24.dp)) }
-                items(recipients.filter { it.name.contains(model.query, ignoreCase = true) }, key = { it.conversation }) { (conv, name, group, peer) ->
-                    SettingsRow(name, onClick = { model.stack.add(ShareReview(conv, name)) }, leadingSize = 52.dp,
-                        leading = { if (group) GroupAvatar(name, emptyList(), conversation = conv) else Avatar(name, identityKey = peer ?: conv, image = rememberAvatar(peer)) })
-                }
-            }
+@Composable private fun ShareScreen(model: IncomingShareVM, done: () -> Unit) {
+    val targets by model.targets.collectAsState()
+    val staged by model.staged.collectAsState()
+    val picks = model.picks
+    val subject = when {
+        picks.isNotEmpty() -> SendToSubject(if (model.busy && !model.sending) "Preparing…" else describe(picks, staged)) {
+            SubjectThumbStack(picks.map { it.preview })
         }
+        model.link != null -> SendToSubject(model.link!!.removePrefix("https://").removePrefix("http://")) { SubjectIconTile(R.drawable.oi_link) }
+        else -> SendToSubject("A message") { SubjectIconTile(R.drawable.oi_message_text) }
     }
+    SendToScreen(
+        title = "Send to…",
+        targets = targets,
+        selected = model.selected,
+        onToggle = { if (!model.selected.remove(it)) model.selected.add(it) },
+        subject = subject,
+        comment = model.text,
+        onComment = { model.text = it },
+        commentHint = if (picks.isNotEmpty()) "Add a caption" else if (model.link != null) "Add a comment" else "Message",
+        canSend = model.canSend(staged),
+        busy = model.sending,
+        error = model.error,
+        docked = false,
+    ) { model.send(done) }
 }
 
-@Composable private fun ReviewShare(model: IncomingShareVM, destination: ShareReview, done: () -> Unit) {
-    val staged by model.staged.collectAsState()
-    androidx.activity.compose.BackHandler(model.sending) { }
-    SimpleScreen(title = { Text(destination.name) }, connectionStatus = false, actions = {
-        TextButton(enabled = model.canSend(staged), onClick = { model.send(destination.conversation, done) }) { Text("Send") }
-    }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(start = 18.dp, end = 18.dp,
-            top = padding.calculateTopPadding() + 16.dp, bottom = padding.calculateBottomPadding() + 24.dp)) {
-            item { model.Picks() }
-            item { AppTextField(model.text, { model.text = it }, Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                enabled = !model.busy, singleLine = false, minLines = 3, maxLines = 8, placeholder = "Message") }
-            if (model.busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            model.error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
-        }
-    }
+private fun describe(picks: List<SharedPick>, staged: List<uniffi.core.StagedRecord>): String {
+    val kinds = picks.map { p -> staged.firstOrNull { it.id == p.id } }
+    val photos = kinds.count { it?.kind?.toInt() == 1 }
+    val videos = kinds.count { it?.kind?.toInt() != 1 && it?.mime?.startsWith("video/") == true }
+    val files = picks.size - photos - videos
+    fun n(count: Int, one: String, many: String) = if (count == 1) "a $one" else "$count $many"
+    val parts = listOfNotNull(
+        n(photos, "photo", "photos").takeIf { photos > 0 },
+        n(videos, "video", "videos").takeIf { videos > 0 },
+        n(files, "file", "files").takeIf { files > 0 },
+    )
+    val text = if (parts.size > 1) parts.dropLast(1).joinToString(", ") + " and " + parts.last() else parts.firstOrNull().orEmpty()
+    return text.replaceFirstChar { it.uppercase() }
 }

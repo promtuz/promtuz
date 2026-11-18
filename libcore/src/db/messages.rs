@@ -643,6 +643,11 @@ const MIGRATION_ARRAY: &[M] = &[
     // Unused. Kept because the pushed Secret chat build ran it and a version can't be taken back.
     M::up("ALTER TABLE private_conversations ADD COLUMN owner BLOB;")
         .down("ALTER TABLE private_conversations DROP COLUMN owner;"),
+    M::up("ALTER TABLE messages ADD COLUMN forwarded_from TEXT;
+    CREATE TRIGGER message_forward_tombstone AFTER UPDATE OF deleted ON messages
+        WHEN NEW.deleted=1 AND NEW.forwarded_from IS NOT NULL BEGIN
+        UPDATE messages SET forwarded_from=NULL WHERE id=NEW.id;
+    END;").down("DROP TRIGGER message_forward_tombstone; ALTER TABLE messages DROP COLUMN forwarded_from;"),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -684,8 +689,8 @@ mod tests {
 
     #[test]
     fn preparation_migration_keeps_history_and_refuses_to_drop_active_state() {
-        // Just before the preparation migration; four have been appended since.
-        let previous = MIGRATION_ARRAY.len() - 5;
+        // Just before the preparation migration; five have been appended since.
+        let previous = MIGRATION_ARRAY.len() - 6;
         let mut conn = migrate_from(previous, |conn| {
             conn.execute("INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing,
                 timestamp, dispatch_id) VALUES (?1, ?2, ?3, 'existing', 0, 100, ?4)",
