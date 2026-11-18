@@ -45,12 +45,12 @@ For state variants such as pin/unpin or sound on/off, keep the same base coordin
 ### Slash convention
 
 - Use a continuous diagonal slash from upper-left to lower-right, with the shared stroke weight and round caps. Fit the entire variant, including the slash, within the visible margin.
-- Keep the base connected to the slash on its lower-left side. Separate the upper-right side wherever the slash crosses the base or details. Do not introduce gaps on both sides.
+- Keep the base connected to the slash on its upper-right side. Separate the lower-left side wherever the slash crosses the base or details. Do not introduce gaps on both sides.
 - Leave **at least 1.5 units of visible clearance**, measured perpendicular from the slash's painted edge to the nearest painted edge of the separated geometry, including round caps. A centerline offset is not the visible gap.
-- For two 1.75-unit strokes, the separated centerline needs at least `1.5 + 0.875 + 0.875 = 3.25` units of perpendicular distance. For a 45-degree slash on `y = x`, the separated side therefore ends at `x - y >= 3.25 * sqrt(2)`, approximately **4.6**. Remove geometry in the strip `0 < x - y < 4.6`; preserve the connected side. For another slash angle, use perpendicular distance to that line.
+- For two 1.75-unit strokes, the separated centerline needs at least `1.5 + 0.875 + 0.875 = 3.25` units of perpendicular distance. For a 45-degree slash on `y = x`, the separated side therefore ends at `y - x >= 3.25 * sqrt(2)`, approximately **4.6**. Remove geometry in the strip `0 < y - x < 4.6`; preserve the connected side. For another slash angle, use perpendicular distance to that line.
 - Trim actual paths and arcs. Keep the SVG transparent and editable; do not cover intersections with background-colored paint. Inspect the complete remaining curves for clearance, not only their endpoints.
 
-[Unpin](assets/unpin.svg) and [speaker off](assets/speaker-off.svg) demonstrate the approved connection and spacing. Use these when creating or refining slashed variants.
+[Unpin](assets/unpin.svg), [speaker off](assets/speaker-off.svg) and [mic off](assets/mic-off.svg) demonstrate the approved connection and spacing. Use these when creating or refining slashed variants.
 
 ### Speaker waves
 

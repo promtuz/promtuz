@@ -192,8 +192,8 @@ private fun QrScannerTopBar(camera: Camera?, viewModel: QrScannerVM, onBack: () 
                     camera.cameraControl.enableTorch(torchEnabled)
                 }) {
                     Icon(
-                        painterResource(if (torchEnabled) R.drawable.i_flash_off else R.drawable.i_flash_on),
-                        if (torchEnabled) "Turn Flash Off" else "Turn Flash On",
+                        painterResource(if (torchEnabled) R.drawable.oi_torch else R.drawable.oi_torch_off),
+                        if (torchEnabled) "Turn flashlight off" else "Turn flashlight on",
                         Modifier, Color.White
                     )
                 }
