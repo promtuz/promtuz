@@ -77,9 +77,13 @@ object CoreEventBus : CoreEvents {
         }
     }
 
+    // A commit made on the main thread would resume Main.immediate readers inline, inside core's lock.
     override fun onDbChanged(tables: List<String>) {
-        _dbChanged.tryEmit(tables.toSet())
+        val changed = tables.toSet()
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) main.post { _dbChanged.tryEmit(changed) }
+        else _dbChanged.tryEmit(changed)
     }
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
     override fun onMessage(event: MessageEvent) {
         _dbChanged.tryEmit(MESSAGES)
