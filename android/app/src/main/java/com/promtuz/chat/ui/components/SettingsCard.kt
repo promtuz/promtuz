@@ -11,6 +11,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -190,11 +192,12 @@ fun SettingsSwitchRow(
     onClick: (() -> Unit)? = null,
 ) {
     val inset = modifier.dividerInset(if (icon != null) Inset + Glyph + GlyphGap else Inset)
-    // The row ripples like any row; a press on the switch itself is the switch's own and ripples nothing.
+    // The row owns the tap, so it is one switch to TalkBack and its press stretches the thumb; the switch keeps the drag.
+    val press = remember { MutableInteractionSource() }
     if (onClick == null) RowFrame(
-        inset.toggleable(checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange),
+        inset.toggleable(checked, press, LocalIndication.current, enabled, Role.Switch, onCheckedChange),
         title, subtitle, icon, null, enabled,
-    ) { AppSwitch(checked, onCheckedChange, enabled = enabled) }
+    ) { AppSwitch(checked, onCheckedChange, enabled = enabled, interactionSource = press, tappable = false) }
     else Row(inset.fillMaxWidth().height(IntrinsicSize.Min), verticalAlignment = Alignment.CenterVertically) {
         RowFrame(Modifier.weight(1f).clickable(enabled = enabled, role = Role.Button, onClick = onClick),
             title, subtitle, icon, null, enabled) {}
@@ -307,7 +310,7 @@ private fun <T> ChoicePopup(
             Text(title, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp).semantics { heading() },
                 style = TextStyle(fontSize = 20.sp, lineHeight = 26.sp), color = c.text)
             Column(
-                Modifier.slabHost(slab, current, c.glassFill, com.promtuz.chat.ui.theme.Radii.tile) { onPick(choices[it].value) },
+                Modifier.slabHost(slab, current, choices.size, c.glassFill, com.promtuz.chat.ui.theme.Radii.tile) { onPick(choices[it].value) },
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 choices.forEachIndexed { i, choice ->

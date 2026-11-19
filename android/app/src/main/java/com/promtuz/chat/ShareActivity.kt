@@ -138,15 +138,18 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
         val to = selected.map { it.fromHex() }
         busy = true; sending = true; error = null
         sendJob = viewModelScope.launch {
+            // Chats that got nothing; a retry goes only to them.
+            val failed = mutableSetOf<String>()
             try {
                 if (owned.isEmpty()) withContext(NonCancellable) {
-                    CoreBridge.commitShared(to, emptyList(), listOfNotNull(text.trim().ifEmpty { null }, link).joinToString("\n"))
+                    failed += CoreBridge.commitShared(to, emptyList(), listOfNotNull(text.trim().ifEmpty { null }, link).joinToString("\n"))
+                        .map { it.toHex() }
                 }
                 else {
                     for (chunk in owned.toList().chunked(10)) {
                         ensureActive()
                         withContext(NonCancellable) {
-                            try { CoreBridge.commitShared(to, chunk.map { it.id }, text.trim()) }
+                            try { failed += CoreBridge.commitShared(to, chunk.map { it.id }, text.trim()).map { it.toHex() } }
                             finally {
                                 val remaining = CoreBridge.stagedItems().map { it.id }.toSet()
                                 val committed = chunk.map { it.id }.filterNot { it in remaining }.toSet()
@@ -156,7 +159,11 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
                         }
                     }
                 }
-                done()
+                if (failed.isEmpty()) done()
+                else {
+                    selected.retainAll(failed)
+                    error = if (failed.size == 1) "Couldn't send to one chat. Try again." else "Couldn't send to ${failed.size} chats. Try again."
+                }
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) {
                 if (owned.isEmpty() && text.isEmpty() && link == null) done()
@@ -202,7 +209,6 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
         canSend = model.canSend(staged),
         busy = model.sending,
         error = model.error,
-        docked = false,
     ) { model.send(done) }
 }
 

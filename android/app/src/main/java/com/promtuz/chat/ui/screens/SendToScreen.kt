@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -76,7 +77,6 @@ class SendToSubject(val headline: String, val tile: @Composable () -> Unit)
 
 /**
  * Picks one or more chats for something that already exists: shared from another app, or forwarded.
- * [docked] runs the bar edge to edge, as forwarding does; otherwise it floats.
  */
 @Composable
 fun SendToScreen(
@@ -91,7 +91,6 @@ fun SendToScreen(
     canSend: Boolean,
     busy: Boolean,
     error: String?,
-    docked: Boolean,
     onSend: () -> Unit,
 ) {
     val c = Promtuz.colors
@@ -161,7 +160,7 @@ fun SendToScreen(
             }
             SendToBar(
                 Modifier.align(Alignment.BottomCenter).onSizeChanged { barHeight = with(density) { it.height.toDp() } },
-                haze, docked, subject, targets, selected, comment, onComment, commentHint, canSend, busy, error, onSend,
+                haze, subject, targets, selected, comment, onComment, commentHint, canSend, busy, error, onSend,
             )
         }
     }
@@ -171,7 +170,6 @@ fun SendToScreen(
 private fun SendToBar(
     modifier: Modifier,
     haze: dev.chrisbanes.haze.HazeState,
-    docked: Boolean,
     subject: SendToSubject,
     targets: List<SendTarget>,
     selected: List<String>,
@@ -184,15 +182,13 @@ private fun SendToBar(
     onSend: () -> Unit,
 ) {
     val c = Promtuz.colors
-    val shape = if (docked) SheetShape else RoundedCornerShape(26.dp)
+    val shape = RoundedCornerShape(26.dp)
     val names = selected.mapNotNull { id -> targets.firstOrNull { it.conversation == id }?.name }
     val picked = selected.isNotEmpty()
+    CompositionLocalProvider(LocalOnGlass provides true) {
     Column(
-        modifier.fillMaxWidth().imePadding()
-            .then(if (docked) Modifier else Modifier.navigationBarsPadding().padding(horizontal = 8.dp, vertical = 8.dp))
+        modifier.fillMaxWidth().imePadding().navigationBarsPadding().padding(8.dp)
             .floatingSurface(shape, haze)
-            .border(1.dp, (if (c.isDark) Color.White else Color.Black).copy(alpha = 0.08f), shape)
-            .then(if (docked) Modifier.navigationBarsPadding() else Modifier)
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -213,7 +209,7 @@ private fun SendToBar(
         // The field and the send button join as a pair: 20 outside, 16 where they meet.
         val joint by androidx.compose.animation.core.animateDpAsState(if (picked) 16.dp else Radii.field,
             ChatMotion.spec(), label = "field joint")
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             BasicTextField(comment, onComment, enabled = !busy, maxLines = 5,
                 textStyle = RowTitleStyle.copy(color = c.text),
                 cursorBrush = SolidColor(c.accentFill),
@@ -227,35 +223,38 @@ private fun SendToBar(
                         inner()
                     }
                 })
+            // While leaving, the button keeps the look it had: unpicking the last chat must not grey it or drop its count first.
+            var shownCount by remember { mutableIntStateOf(selected.size) }
+            if (picked) shownCount = selected.size
             AnimatedVisibility(picked,
                 enter = fadeIn(ChatMotion.spec()) + scaleIn(spring(), initialScale = 0.5f),
-                exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.5f)) {
-                Box {
+                exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.5f) +
+                    shrinkHorizontally(ChatMotion.spec(), shrinkTowards = Alignment.End, clip = false)) {
+                Box(Modifier.padding(start = 6.dp)) {
                     Box(Modifier.size(46.dp).clip(RoundedCornerShape(16.dp, Radii.field, Radii.field, 16.dp))
-                        .background(if (canSend) c.accentFill else c.cardHigh)
+                        .background(if (busy) raisedFill() else c.accentFill)
                         .clickable(enabled = canSend, role = Role.Button, onClick = onSend),
                         contentAlignment = Alignment.Center) {
                         DrawableIcon(R.drawable.i_send, desc = "Send", size = 22.dp, tint = Color.White)
                     }
-                    if (selected.size > 1) Box(
-                        Modifier.align(Alignment.TopEnd).offset(x = 5.dp, y = (-5).dp)
-                            .dropShadow(RoundedCornerShape(9.dp), androidx.compose.ui.graphics.shadow.Shadow(3.dp, Color.Black.copy(alpha = 0.25f)))
-                            .defaultMinSize(22.dp, 22.dp).clip(RoundedCornerShape(9.dp)).background(Color.White)
-                            .padding(horizontal = 6.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        AnimatedCount(selected.size)
+                    androidx.compose.animation.AnimatedVisibility(shownCount > 1, Modifier.align(Alignment.TopEnd).offset(x = 5.dp, y = (-5).dp),
+                        enter = fadeIn(ChatMotion.spec()) + scaleIn(spring(), initialScale = 0.5f),
+                        exit = fadeOut(ChatMotion.spec()) + scaleOut(ChatMotion.spec(), targetScale = 0.5f)) {
+                        Box(
+                            Modifier.dropShadow(RoundedCornerShape(9.dp), androidx.compose.ui.graphics.shadow.Shadow(3.dp, Color.Black.copy(alpha = 0.25f)))
+                                .defaultMinSize(22.dp, 22.dp).clip(RoundedCornerShape(9.dp)).background(Color.White)
+                                .padding(horizontal = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            com.promtuz.chat.ui.animation.QueuedAnimatedNumber(shownCount.coerceAtLeast(2),
+                                style = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, lineHeight = 14.sp, fontWeight = FontWeight.Medium),
+                                color = c.accentFill, label = "send count")
+                        }
                     }
                 }
             }
         }
     }
-}
-
-@Composable
-private fun AnimatedCount(n: Int) {
-    androidx.compose.animation.AnimatedContent(n, label = "send count") {
-        Text(it.toString(), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Promtuz.colors.accentFill)
     }
 }
 
@@ -275,7 +274,7 @@ fun SubjectThumbStack(thumbs: List<androidx.compose.ui.graphics.ImageBitmap?>) {
         thumbs.take(3).withIndex().reversed().forEach { (i, bmp) ->
             val side = (32 - i * 4).dp
             Box(Modifier.offset(x = (i * 12).dp, y = (2 + i * 2).dp).size(side).clip(shape)
-                .background(Promtuz.colors.cardHigh).border(1.5.dp, Promtuz.colors.card, shape),
+                .background(raisedFill()).border(1.5.dp, Promtuz.colors.card, shape),
                 contentAlignment = Alignment.Center) {
                 if (bmp != null) androidx.compose.foundation.Image(bmp, null, Modifier.fillMaxSize(),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop)
@@ -305,13 +304,18 @@ fun ForwardScreen(key: com.promtuz.chat.navigation.Routes.Forward, app: com.prom
         canSend = selected.isNotEmpty() && !busy,
         busy = busy,
         error = error,
-        docked = true,
     ) {
         busy = true
         scope.launch {
             try {
-                CoreBridge.forwardMessages(key.conversation.fromHex(), key.dispatchIds.map { it.fromHex() },
-                    selected.map { it.fromHex() }, comment)
+                val failed = CoreBridge.forwardMessages(key.conversation.fromHex(), key.dispatchIds.map { it.fromHex() },
+                    selected.map { it.fromHex() }, comment).map { it.toHex() }
+                if (failed.isNotEmpty()) {
+                    // The rest already have it, so a retry goes only to these.
+                    selected.retainAll(failed)
+                    error = if (failed.size == 1) "Couldn't forward to one chat. Try again." else "Couldn't forward to ${failed.size} chats. Try again."
+                    return@launch
+                }
                 val only = selected.singleOrNull()?.let { id -> targets.firstOrNull { it.conversation == id } }
                 app.navigator.back()
                 if (only != null) app.openChat(only.conversation, only.name)

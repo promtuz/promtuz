@@ -324,13 +324,16 @@ class ChatVM(
                     "conversations", "conversation_members", "contacts",
                 ),
             ) {
-                if (!app.canOpenChat(conversationHex)) emptyList()
-                else try {
-                    resolveRoster()
-                    load()
-                } catch (error: Exception) {
-                    currentCoroutineContext().ensureActive()
-                    if (!app.canOpenChat(conversationHex)) emptyList() else throw error
+                // load() shares its window with loadOlder on Main.
+                withContext(Dispatchers.Main.immediate) {
+                    if (!app.canOpenChat(conversationHex)) emptyList()
+                    else try {
+                        resolveRoster()
+                        load()
+                    } catch (error: Exception) {
+                        currentCoroutineContext().ensureActive()
+                        if (!app.canOpenChat(conversationHex)) emptyList() else throw error
+                    }
                 }
             }.collect { list ->
                 // Their message inherits the typing bubble. The handoff is set before the list so

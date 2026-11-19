@@ -5,6 +5,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -66,8 +67,10 @@ fun rememberSlabState(vertical: Boolean = false) = remember(vertical) { SlabStat
 
 /** On the container: draws the slab behind the options, moves it, and turns presses into selection. */
 @Composable
-fun Modifier.slabHost(state: SlabState, selected: Int, color: Color, radius: Dp, onSelect: (Int) -> Unit): Modifier {
+fun Modifier.slabHost(state: SlabState, selected: Int, count: Int, color: Color, radius: Dp, onSelect: (Int) -> Unit): Modifier {
     val select by rememberUpdatedState(onSelect)
+    // An option that left keeps no bounds, so a press can never select an index that is gone.
+    SideEffect { state.rects.keys.filter { it >= count }.forEach(state.rects::remove) }
     SlabMotion(state, selected)
     return this.then(Modifier.onPlaced { state.host = it })
         .then(Modifier.pointerInput(state) { slabGestures(state) { select(it) } })

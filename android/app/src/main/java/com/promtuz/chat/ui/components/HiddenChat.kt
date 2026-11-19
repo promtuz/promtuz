@@ -62,7 +62,7 @@ fun HideChatSheet(name: String, busy: Boolean, onHide: () -> Unit, onDismiss: ()
             Modifier.fillMaxWidth().padding(horizontal = 17.dp).padding(top = 12.dp, bottom = 24.dp).navigationBarsPadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Box(Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)).background(c.card), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)).background(cardFill()), contentAlignment = Alignment.Center) {
                 DrawableIcon(R.drawable.oi_hidden_chat, size = 36.dp, tint = c.accent)
             }
             Spacer(Modifier.height(16.dp))

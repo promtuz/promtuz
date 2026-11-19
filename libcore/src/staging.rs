@@ -310,12 +310,14 @@ pub(crate) fn stage_source_attachment(mut source:crate::media::ports::SourceLeas
 pub async fn commit(
     conversation: [u8; 16], ids: Vec<u64>, caption: String, reply_to: Option<[u8; 16]>,
 ) -> Result<()> {
-    commit_all(&[conversation], ids, caption, reply_to)
+    commit_all(&[conversation], ids, caption, reply_to).map(|_| ())
 }
 
+/// Returns the chats that failed, so a retry goes only to them; items stay staged until every
+/// chat has them. Fails outright only when no chat got anything.
 pub fn commit_all(
     conversations: &[[u8; 16]], ids: Vec<u64>, caption: String, reply_to: Option<[u8; 16]>,
-) -> Result<()> {
+) -> Result<Vec<[u8; 16]>> {
     if ids.is_empty() {
         bail!("nothing staged");
     }
@@ -338,10 +340,26 @@ pub fn commit_all(
             }
         }
     }
+    each_chat(conversations, |conversation, last| commit_to(conversation, &staged, &caption, reply_to, last))
+}
+
+/// Runs `send` for every chat, telling it whether it is the last with nothing failed before it.
+pub(crate) fn each_chat(
+    conversations: &[[u8; 16]], mut send: impl FnMut([u8; 16], bool) -> Result<()>,
+) -> Result<Vec<[u8; 16]>> {
+    let mut failed = Vec::new();
+    let mut error = None;
     for (i, &conversation) in conversations.iter().enumerate() {
-        commit_to(conversation, &staged, &caption, reply_to, i + 1 == conversations.len())?;
+        if let Err(e) = send(conversation, i + 1 == conversations.len() && failed.is_empty()) {
+            log::warn!("SEND: one chat failed: {e:#}");
+            failed.push(conversation);
+            error = Some(e);
+        }
     }
-    Ok(())
+    match error {
+        Some(e) if failed.len() == conversations.len() => Err(e),
+        _ => Ok(failed),
+    }
 }
 
 fn commit_to(
@@ -414,6 +432,19 @@ mod tests {
 
     use super::*;
     use crate::test_support::ScopedCore;
+
+    #[test]
+    fn a_partial_send_names_only_the_failed_chats_and_holds_the_items() {
+        let mut lasts = Vec::new();
+        let failed = each_chat(&[[1; 16], [2; 16], [3; 16]], |c, last| {
+            lasts.push(last);
+            if c == [2; 16] { bail!("no") } else { Ok(()) }
+        }).unwrap();
+        assert_eq!(failed, vec![[2; 16]]);
+        assert_eq!(lasts, [false, false, false], "a failure keeps the items for the retry");
+        assert!(each_chat(&[[1; 16]], |_, _| bail!("no")).is_err());
+        assert_eq!(each_chat(&[[1; 16], [2; 16]], |_, _| Ok(())).unwrap(), Vec::<[u8; 16]>::new());
+    }
 
     #[tokio::test]
     async fn stale_private_work_cannot_publish_after_lock_or_a_later_unlock() {

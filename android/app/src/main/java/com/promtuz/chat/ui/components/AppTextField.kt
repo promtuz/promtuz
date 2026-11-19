@@ -71,8 +71,7 @@ object AppTextFieldDefaults {
     fun colors(): AppTextFieldColors {
         LocalAppTextFieldColors.current?.let { return it }
         return AppTextFieldColors(
-            container = if (LocalOnGlass.current) Promtuz.colors.glassCard
-                else if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage,
+            container = if (LocalOnGlass.current) Promtuz.colors.glassCard else pageFieldFill(),
             text = Promtuz.colors.text,
             placeholder = Promtuz.colors.muted.copy(0.7f),
             label = Promtuz.colors.accentFill,

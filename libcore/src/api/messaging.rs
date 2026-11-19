@@ -184,17 +184,17 @@ pub fn forward_origins(conversation_id: Vec<u8>) -> Result<Vec<ForwardOrigin>, C
 }
 
 /// Copies the messages in order into every target, then sends `comment`. Nothing is saved unless
-/// all of them can go: an attachment must be on this device.
+/// all of them can go: an attachment must be on this device. Returns the chats that failed.
 #[uniffi::export]
 pub fn forward_messages(
     source_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>, target_ids: Vec<Vec<u8>>, comment: String,
-) -> Result<(), CoreError> {
-    Ok(forward(source_id, dispatch_ids, target_ids, comment)?)
+) -> Result<Vec<Vec<u8>>, CoreError> {
+    Ok(forward(source_id, dispatch_ids, target_ids, comment)?.into_iter().map(|c| c.to_vec()).collect())
 }
 
 fn forward(
     source_id: Vec<u8>, dispatch_ids: Vec<Vec<u8>>, target_ids: Vec<Vec<u8>>, comment: String,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<[u8; 16]>> {
     use anyhow::{anyhow, ensure};
     let source = fixed::<16>(&source_id, "conversation id")?;
     crate::privacy::require_access(&source)?;
@@ -232,7 +232,7 @@ fn forward(
         crate::privacy::require_access(t)?;
         ensure!(!crate::privacy::is_private(t) || !items.iter().any(|i| i.3), "Files can't be forwarded into a locked chat");
     }
-    for to in targets {
+    crate::staging::each_chat(&targets, |to, _| {
         let mut saved = Vec::new();
         let mut albums = std::collections::HashMap::new();
         for (content, media, origin, _) in &items {
@@ -258,8 +258,8 @@ fn forward(
                 }
             }
         });
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Edit text or a media caption, preserving its body. Local validation and

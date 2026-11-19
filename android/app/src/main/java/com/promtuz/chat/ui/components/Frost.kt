@@ -75,17 +75,17 @@ fun Modifier.sheetSurface(haze: HazeState? = LocalRootHaze.current): Modifier =
     if (haze != null) frost(haze, FrostRole.Sheet, SheetShape) else clip(SheetShape).background(Promtuz.colors.card)
 
 @Composable
-private fun rememberFrostStyle(role: FrostRole, scrolled: State<() -> Float>): HazeBlurStyle {
+private fun rememberFrostStyle(role: FrostRole, scrolled: State<() -> Float>, page: Color): HazeBlurStyle {
     val c = Promtuz.colors
     val chatBar = LocalChatColors.current.bar
-    return remember(role, c, chatBar) {
+    return remember(role, c, chatBar, page) {
         HazeBlurStyle {
             noiseFactor(0f)
             when (role) {
                 // At rest the bar is identical to the page; it turns to card glass as content slides under.
                 FrostRole.Bar -> {
-                    val tint = lerp(c.page, c.card, scrolled.value().coerceIn(0f, 1f))
-                    frost(c.page, tint.copy(alpha = if (c.isDark) 0.76f else 0.74f), 36f)
+                    val tint = lerp(page, c.card, scrolled.value().coerceIn(0f, 1f))
+                    frost(page, tint.copy(alpha = if (c.isDark) 0.76f else 0.74f), 36f)
                 }
                 // Sheets, dialogs and menus share the composer's glass so every floating layer reads alike.
                 FrostRole.ChatBar, FrostRole.Sheet, FrostRole.Floating -> frost(chatBar, chatBar.copy(alpha = 0.76f), 38f)
@@ -113,12 +113,14 @@ fun Modifier.frost(
     role: FrostRole,
     shape: Shape? = null,
     scrolled: () -> Float = { 1f },
+    page: Color = Promtuz.colors.page,
 ): Modifier {
     val c = Promtuz.colors
-    val style = rememberFrostStyle(role, rememberUpdatedState(scrolled))
+    val style = rememberFrostStyle(role, rememberUpdatedState(scrolled), page)
     if (shape != null) {
         val halo = if (c.isDark) this else dropShadow(shape, RimHalo)
-        return halo.clip(shape).hazeBlur(HazeInput.Sources(state), style).rim(shape, c.isDark)
+        // A sheet rises from the bottom edge, so only its top is lit.
+        return halo.clip(shape).hazeBlur(HazeInput.Sources(state), style).rim(shape, c.isDark, bottom = role != FrostRole.Sheet)
     }
     val frosted = hazeBlur(HazeInput.Sources(state), style)
     if (role != FrostRole.Bar) return frosted
@@ -134,20 +136,20 @@ fun Modifier.frost(
 private val RimHalo = Shadow(1.dp, Color.Black.copy(alpha = 0.125f), offset = DpOffset(0.dp, 0.33.dp))
 
 /** Two inner crescents lit from above: the shape minus itself shifted down, and minus itself shifted up. */
-private fun Modifier.rim(shape: Shape, dark: Boolean): Modifier = drawWithCache {
+private fun Modifier.rim(shape: Shape, dark: Boolean, bottom: Boolean = true): Modifier = drawWithCache {
     val body = Path().apply { addOutline(shape.createOutline(size, layoutDirection, this@drawWithCache)) }
     fun crescent(dy: Float) = Path().apply {
         op(body, Path().apply { addPath(body, Offset(0f, dy)) }, PathOperation.Difference)
     }
     val top = crescent(1.dp.toPx())
-    val bottom = crescent(-0.67.dp.toPx())
+    val lower = if (bottom) crescent(-0.67.dp.toPx()) else null
     val topColor = Color.White.copy(alpha = if (dark) 0.157f else 1f)
     val bottomColor = Color.White.copy(alpha = if (dark) 0.078f else 1f)
     // Over the content, so edge-to-edge children (a photo grid, a highlighted row) never hide the edge.
     onDrawWithContent {
         drawContent()
         drawPath(top, topColor)
-        drawPath(bottom, bottomColor)
+        if (lower != null) drawPath(lower, bottomColor)
     }
 }
 

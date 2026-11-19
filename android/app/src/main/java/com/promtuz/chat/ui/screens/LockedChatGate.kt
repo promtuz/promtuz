@@ -39,8 +39,10 @@ import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.core.CoreBridge
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Stands in for a locked chat's content until its code opens a session; [onOpened] gets the session. */
 @Composable
@@ -170,14 +172,21 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
     }
     }
 
+    // Hidden chats and groups lose different things, so the dialog says which.
+    val option by produceState<uniffi.core.PrivateResetOption?>(null, forgot) {
+        value = if (!forgot) null else withContext(Dispatchers.IO) {
+            runCatching { uniffi.core.lockedConversationResetOptions() }.getOrNull()
+                ?.firstOrNull { it.conversationId.contentEquals(conversation.fromHex()) }
+        }
+    }
     if (forgot) AppAlertDialog(
         onDismissRequest = { if (!resetting) forgot = false },
-        title = { Text("Reset $name?") },
+        title = { Text(option?.resetTitle() ?: "Reset $name?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("This permanently deletes the locked history. The chat stays, and you can keep messaging.")
+            option?.let { Text(it.resetConsequence()) }
             resetError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         } },
-        confirmButton = { TextButton(enabled = !resetting, onClick = {
+        confirmButton = { TextButton(enabled = !resetting && option != null, onClick = {
             resetting = true
             scope.launch {
                 // Once reset, the chat is no longer locked and its entry opens it.
@@ -186,7 +195,7 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
                     .onFailure { resetError = "Couldn't reset this chat" }
                 resetting = false
             }
-        }) { Text("Delete history", color = MaterialTheme.colorScheme.error) } },
+        }) { Text(if (option?.tag != null) "Delete chat" else "Delete history", color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(enabled = !resetting, onClick = { forgot = false }) { Text("Cancel") } },
     )
 }

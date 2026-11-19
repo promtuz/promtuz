@@ -34,7 +34,7 @@ fun GlassTabBar(haze: HazeState, tabs: List<GlassTabItem>, selected: Int, onSele
             .navigationBarsPadding()
             .padding(bottom = 6.dp)
             .floatingSurface(RoundedCornerShape(Radii.pill), haze)
-            .slabHost(slab, selected, c.glassFill, concentric(Radii.pill, 4.dp), onSelect)
+            .slabHost(slab, selected, tabs.size, c.glassFill, concentric(Radii.pill, 4.dp), onSelect)
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,

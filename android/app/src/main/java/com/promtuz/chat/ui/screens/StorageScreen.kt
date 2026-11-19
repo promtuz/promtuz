@@ -388,7 +388,7 @@ private fun MediaTile(
 ) {
     val c = Promtuz.colors
     val bitmap by produceState<ImageBitmap?>(null, source, item.key) {
-        if (item.kind == 1) try { value = previews.get(source, item) }
+        if (item.kind != 3) try { value = previews.get(source, item) }
         catch (e: CancellationException) { throw e }
         catch (_: Exception) { /* The tile still shows its kind and size. */ }
     }

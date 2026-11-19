@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -227,11 +228,13 @@ fun AppSlider(
     val rtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
     val fraction = ((value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
     val thumb = 20.dp
+    // The gesture outlives recompositions, so it must call the latest callback.
+    val onChange by rememberUpdatedState(onValueChange)
     fun pick(x: Float, width: Float, inset: Float) {
         var f = ((x - inset) / (width - inset * 2)).coerceIn(0f, 1f)
         if (rtl) f = 1f - f
         if (steps > 0) f = Math.round(f * (steps + 1)) / (steps + 1f)
-        onValueChange(range.start + f * (range.endInclusive - range.start))
+        onChange(range.start + f * (range.endInclusive - range.start))
     }
     Box(
         modifier
@@ -286,7 +289,7 @@ fun SegmentedTabs(labels: List<String>, selected: Int, modifier: Modifier = Modi
     val c = Promtuz.colors
     val slab = rememberSlabState()
     Row(modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill())
-        .slabHost(slab, selected, raisedFill(), concentric(Radii.card, 4.dp), onSelect).padding(4.dp)) {
+        .slabHost(slab, selected, labels.size, raisedFill(), concentric(Radii.card, 4.dp), onSelect).padding(4.dp)) {
         labels.forEachIndexed { i, label ->
             val on = slab.shown(selected) == i
             Box(

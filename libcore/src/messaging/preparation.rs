@@ -23,8 +23,11 @@ struct Stored {
 pub(super) fn completion_for_post(
     conversation: &[u8; 16], target: &[u8; 16], post: &AppPayload,
 ) -> Result<Option<CompletedMedia>> {
-    let AppPayload::Post { reply_to, body: body @ Body::Attachment { mime, file_id, .. } } = post else {
-        return Ok(None);
+    let (reply_to, body, mime, file_id) = match post {
+        AppPayload::Post { reply_to, body: body @ Body::Attachment { mime, file_id, .. } } => (*reply_to, body, mime, file_id),
+        // A forward is a new message of ours, so its video completes like one we posted.
+        AppPayload::Forward { body: body @ Body::Attachment { mime, file_id, .. }, .. } => (None, body, mime, file_id),
+        _ => return Ok(None),
     };
     if mime != "video/mp4" {
         return Ok(None);
@@ -48,7 +51,7 @@ pub(super) fn completion_for_post(
     Ok(Some(CompletedMedia {
         target: *target,
         attempt: MediaAttempt { generation: 0, id: *target },
-        reply_to: *reply_to,
+        reply_to,
         presentation,
         body: body.clone(),
     }))
@@ -406,6 +409,9 @@ mod tests {
         assert_eq!(first.attempt.generation, 0);
         assert_eq!(first.attempt.id, finished.target);
         assert_eq!(first.body, finished.body);
+        let forward = AppPayload::Forward { from: "Dana".into(), body: finished.body.clone() };
+        assert_eq!(completion_for_post(&CONVERSATION, &finished.target, &forward).unwrap().as_ref(), Some(&first),
+            "a forwarded video completes like a posted one");
         assert_eq!(Some(first), completion_for_post(&CONVERSATION, &finished.target, &post).unwrap());
         row.file_id = Some(vec![9; 32]);
         media::save_tx(&core().db.messages().lock(), &CONVERSATION, &finished.target, &row).unwrap();

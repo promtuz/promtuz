@@ -73,8 +73,14 @@ object Notifications {
 
     fun ensureChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        nm.deleteNotificationChannel(LEGACY_MESSAGES)
-        AlertKind.entries.forEach { createKind(ctx, nm, it) }
+        // The single "messages" channel split in two; the new ones keep what the user set on it.
+        val legacy = nm.getNotificationChannel(LEGACY_MESSAGES)
+        AlertKind.entries.forEach {
+            val fresh = legacy != null && nm.getNotificationChannel(channel(ctx, it)) == null
+            if (fresh) adopt(ctx, it, legacy!!)
+            createKind(ctx, nm, it, blocked = fresh && legacy!!.importance == NotificationManager.IMPORTANCE_NONE)
+        }
+        if (legacy != null) nm.deleteNotificationChannel(LEGACY_MESSAGES)
         // Banners while the app is open; Promtuz plays its own sound for those, per the in-app settings.
         nm.createNotificationChannel(
             NotificationChannel(IN_APP_CHANNEL, "While using Promtuz", NotificationManager.IMPORTANCE_HIGH).apply {
@@ -97,9 +103,24 @@ object Notifications {
         )
     }
 
-    private fun createKind(ctx: Context, nm: NotificationManager, kind: AlertKind) {
+    private fun adopt(ctx: Context, kind: AlertKind, legacy: NotificationChannel) {
+        prefs(ctx).edit {
+            putString("${kind.key}_sound", when (legacy.sound) {
+                null -> "none"
+                Settings.System.DEFAULT_NOTIFICATION_URI -> ""
+                else -> legacy.sound.toString()
+            })
+            putBoolean("${kind.key}_popup", legacy.importance >= NotificationManager.IMPORTANCE_HIGH)
+        }
+    }
+
+    private fun createKind(ctx: Context, nm: NotificationManager, kind: AlertKind, blocked: Boolean = false) {
         val s = style(ctx, kind)
-        val importance = if (s.popup) NotificationManager.IMPORTANCE_HIGH else NotificationManager.IMPORTANCE_DEFAULT
+        val importance = when {
+            blocked -> NotificationManager.IMPORTANCE_NONE
+            s.popup -> NotificationManager.IMPORTANCE_HIGH
+            else -> NotificationManager.IMPORTANCE_DEFAULT
+        }
         nm.createNotificationChannel(NotificationChannel(channel(ctx, kind), kind.label, importance).apply {
             if (s.sound.isNotEmpty()) setSound(s.soundUri, AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)

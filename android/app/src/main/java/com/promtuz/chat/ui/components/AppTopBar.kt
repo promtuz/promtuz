@@ -27,6 +27,13 @@ private class ScreenGlass(val haze: HazeState, val page: Color)
 /** Set by [ScreenScaffold]; a bar outside one has nothing to blur and stays opaque. */
 private val LocalScreenGlass = staticCompositionLocalOf<ScreenGlass?> { null }
 
+/** A field's fill on the current screen: light grouped pages are grey, so their fields are white. */
+@Composable
+fun pageFieldFill(): Color {
+    val c = Promtuz.colors
+    return if (c.isDark || LocalScreenGlass.current?.page == c.groupedPage) c.card else c.groupedPage
+}
+
 /** Both endpoints are opaque: transparent black must never enter the color tween. */
 @Composable
 fun appTopBarColors(): TopAppBarColors = TopAppBarDefaults.topAppBarColors(
@@ -48,7 +55,7 @@ fun AppTopBar(
     val glass = LocalScreenGlass.current
     val glassModifier = if (glass == null) Modifier else Modifier
         .freezeOnExit()
-        .frost(glass.haze, FrostRole.Bar) { scrollBehavior?.state?.overlappedFraction ?: 0f }
+        .frost(glass.haze, FrostRole.Bar, page = glass.page, scrolled = { scrollBehavior?.state?.overlappedFraction ?: 0f })
     TopAppBar(
         title = {
             Box(Modifier.centerBarTitle(screenTitleStyle())) {

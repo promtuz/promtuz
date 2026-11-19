@@ -40,6 +40,8 @@ data class HomeMenuAnchor(
 
 class HomeMenuState : DragMenuState<HomeMenuAnchor>(12)
 
+private const val Dim = 0.36f
+
 /** [HomeMenuState.close] plays the exit, then releases the anchor. */
 @Composable
 fun HomeContextMenu(state: HomeMenuState, haze: HazeState) {
@@ -47,7 +49,7 @@ fun HomeContextMenu(state: HomeMenuState, haze: HazeState) {
 
     var origin by remember { mutableStateOf(Offset.Zero) }
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
-        MenuBackdrop(state, dim = 0.36f, scrimMs = 300, popMs = 220, exitMs = 150)
+        MenuBackdrop(state, dim = Dim, scrimMs = 300, popMs = 220, exitMs = 150)
         val row = anchor.row
         val snapshot = anchor.snapshot
         if (row != null && snapshot != null) {
@@ -58,7 +60,8 @@ fun HomeContextMenu(state: HomeMenuState, haze: HazeState) {
                     .offset { androidx.compose.ui.unit.IntOffset((row.left - origin.x).roundToInt(), (row.top - origin.y).roundToInt()) }
                     .size(with(density) { row.width.toDp() }, with(density) { row.height.toDp() })
                     .graphicsLayer {
-                        val p = state.scrim.value / 0.28f
+                        // The lifted row fades with the dim, so it is fully there exactly when the dim is.
+                        val p = state.scrim.value / Dim
                         alpha = p.coerceIn(0f, 1f)
                     }
                     .clip(androidx.compose.foundation.shape.RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.card))

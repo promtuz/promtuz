@@ -112,7 +112,9 @@
                     android:scheme="promtuz" />
             </intent-filter>
         </activity>
+        <!-- A new task per share: otherwise a second share only raises the first one's task. -->
         <activity android:name=".ShareActivity" android:exported="true"
+            android:documentLaunchMode="always" android:autoRemoveFromRecents="true"
             android:label="Promtuz" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

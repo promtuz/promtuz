@@ -66,7 +66,7 @@ fun ProfileScaffold(
             val progress = scroll.state.collapsedFraction
             BoxWithConstraints(
                 Modifier.fillMaxWidth()
-                    .frost(haze, FrostRole.Bar) { scroll.state.overlappedFraction }
+                    .frost(haze, FrostRole.Bar, page = c.groupedPage, scrolled = { scroll.state.overlappedFraction })
                     .windowInsetsPadding(TopAppBarDefaults.windowInsets)
                     .height(lerp(expanded, 64.dp, progress)),
             ) {

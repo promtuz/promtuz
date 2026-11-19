@@ -17,9 +17,7 @@ import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.koin.compose.koinInject
 import uniffi.core.PrivateResetOption
 
@@ -34,7 +32,7 @@ fun ResetLockedChatsScreen() {
     var busy by remember { mutableStateOf(false) }
     val options by remember {
         observeQuery(setOf("messages", "conversations", "contacts", "private_conversations")) {
-            withContext(Dispatchers.IO) { uniffi.core.lockedConversationResetOptions() }
+            uniffi.core.lockedConversationResetOptions()
         }
     }.collectAsState(emptyList())
     val (hidden, locked) = options.partition { it.tag != null }
@@ -82,13 +80,9 @@ fun ResetLockedChatsScreen() {
     selected?.let { option ->
         val isHidden = option.tag != null
         AppAlertDialog(onDismissRequest = { if (!busy) selected = null },
-            title = { Text(if (isHidden) "Reset hidden chat ${option.tag!!.code}?" else "Reset ${option.name}?") },
+            title = { Text(option.resetTitle()) },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(when {
-                    isHidden -> "This deletes the chat and its history from this phone. You can add them again."
-                    option.isGroup -> "This permanently deletes the locked history. You stay in the group. Another member must be available to restore messaging."
-                    else -> "This permanently deletes the locked history. The contact stays, and you can start a fresh chat."
-                })
+                Text(option.resetConsequence())
                 error?.let { Text(it, color = Promtuz.colors.danger) }
             } },
             confirmButton = { TextButton(enabled = !busy, onClick = {
@@ -110,4 +104,12 @@ fun ResetLockedChatsScreen() {
 private fun lockedAgo(option: PrivateResetOption): String? = option.lockedAt.toLong().takeIf { it > 0 }?.let {
     "Locked " + DateUtils.getRelativeTimeSpanString(it * 1000, System.currentTimeMillis(), DateUtils.DAY_IN_MILLIS)
         .toString().replaceFirstChar { c -> c.lowercase() }
+}
+
+internal fun PrivateResetOption.resetTitle() = tag?.let { "Reset hidden chat ${it.code}?" } ?: "Reset $name?"
+
+internal fun PrivateResetOption.resetConsequence() = when {
+    tag != null -> "This deletes the chat and its history from this phone. You can add them again."
+    isGroup -> "This permanently deletes the locked history. You stay in the group. Another member must be available to restore messaging."
+    else -> "This permanently deletes the locked history. The contact stays, and you can start a fresh chat."
 }

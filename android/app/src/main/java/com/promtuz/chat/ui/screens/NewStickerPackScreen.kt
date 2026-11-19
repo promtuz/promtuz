@@ -87,7 +87,7 @@ fun NewStickerPackScreen(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     suffix = { Text("$nameLength/$NameMax", style = RowSubtitleStyle, color = if (nameLength > NameMax) c.danger else c.muted) },
                     shape = RoundedCornerShape(Radii.card),
-                    colors = AppTextFieldDefaults.colors().copy(container = c.card, label = c.accent),
+                    colors = AppTextFieldDefaults.colors().copy(label = c.accent),
                 )
                 CardGap()
             }

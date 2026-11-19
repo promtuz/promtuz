@@ -4,7 +4,14 @@ import android.content.Context
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -32,7 +39,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -52,6 +63,7 @@ import com.promtuz.chat.ui.theme.Radii
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -122,8 +134,8 @@ fun EmojiStickerPanel(
         if (lastPanelTab == ComposerPanelTab.Emoji) Box(
             Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 12.dp, bottom = 6.dp)
                 .size(44.dp).floatingSurface(CircleShape, local)
-                .combinedClickable(onClick = onBackspace, onLongClick = onBackspace)
-                .semantics { contentDescription = "Delete" },
+                .repeatingPress(onBackspace)
+                .semantics { contentDescription = "Delete"; role = Role.Button; onClick { onBackspace(); true } },
             contentAlignment = Alignment.Center,
         ) {
             DrawableIcon(R.drawable.i_backspace, size = 22.dp, tint = Promtuz.colors.text)
@@ -148,15 +160,15 @@ private fun EmojiPanelBody(onEmoji: (String) -> Unit, bottomPadding: Dp) {
     val scope = rememberCoroutineScope()
     val pick: (EmojiItem, String) -> Unit = { item, emoji ->
         onEmoji(emoji)
-        scope.launch(Dispatchers.IO) {
-            val nextRecents = (listOf(emoji) + saved.filter { it != emoji }).take(RecentMax)
-            saved = nextRecents
+        // State changes here so quick taps each build on the last; only the writes leave Main, in order.
+        val nextRecents = (listOf(emoji) + saved.filter { it != emoji }).take(RecentMax)
+        saved = nextRecents
+        val nextTones = if (item.variants.size > 1 && tones[item.base] != emoji)
+            (if (emoji == item.base) tones - item.base else tones + (item.base to emoji)).also { tones = it }
+            else null
+        scope.launch(PrefWrites) {
             ChatPrefs.emojiRecent = nextRecents
-            if (item.variants.size > 1 && tones[item.base] != emoji) {
-                val nextTones = if (emoji == item.base) tones - item.base else tones + (item.base to emoji)
-                tones = nextTones
-                ChatPrefs.emojiTones = nextTones
-            }
+            nextTones?.let { ChatPrefs.emojiTones = it }
         }
     }
     val sections = remember(categories, recents) {
@@ -282,4 +294,29 @@ private fun PackEmoji(emoji: String, index: EmojiPack.Index?, modifier: Modifier
                 filterQuality = FilterQuality.Medium)
         }
     })
+}
+
+private val PrefWrites = Dispatchers.IO.limitedParallelism(1)
+
+/** Fires on press, then repeats while held, like a keyboard's delete key. */
+@Composable
+private fun Modifier.repeatingPress(action: () -> Unit): Modifier {
+    val latest by rememberUpdatedState(action)
+    val scope = rememberCoroutineScope()
+    val source = remember { MutableInteractionSource() }
+    return indication(source, LocalIndication.current).pointerInput(Unit) {
+        awaitEachGesture {
+            val down = awaitFirstDown()
+            val press = PressInteraction.Press(down.position)
+            source.tryEmit(press)
+            val repeat = scope.launch {
+                latest()
+                delay(400)
+                while (true) { latest(); delay(60) }
+            }
+            val up = waitForUpOrCancellation()
+            repeat.cancel()
+            source.tryEmit(if (up != null) PressInteraction.Release(press) else PressInteraction.Cancel(press))
+        }
+    }
 }

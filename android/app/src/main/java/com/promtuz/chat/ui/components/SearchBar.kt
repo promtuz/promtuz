@@ -87,7 +87,7 @@ fun HomeSearchBar(
             .graphicsLayer { alpha = motion.fraction().coerceIn(0f, 1f) }.frost(haze, FrostRole.Floating, shape))
         Box(Modifier.matchParentSize()
             .then(if (haze != null) Modifier.graphicsLayer { alpha = 1f - motion.fraction().coerceIn(0f, 1f) } else Modifier)
-            .clip(shape).background(if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage))
+            .clip(shape).background(pageFieldFill()))
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(44.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
                 DrawableIcon(R.drawable.oi_search, size = 18.dp, strokeWidth = 2.25f,

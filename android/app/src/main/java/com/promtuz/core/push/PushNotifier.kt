@@ -415,6 +415,10 @@ object PushNotifier {
 
     /** The sound and buzz of [kind]'s channel, played by hand while Promtuz is open. */
     private fun feedback(kind: AlertKind, sound: Boolean, vibrate: Boolean) {
+        // Do Not Disturb and a channel switched off in Android's settings keep the app quiet too.
+        val nm = app.getSystemService(NotificationManager::class.java)
+        if (nm.currentInterruptionFilter > NotificationManager.INTERRUPTION_FILTER_ALL) return
+        if (nm.getNotificationChannel(Notifications.channel(app, kind))?.importance == NotificationManager.IMPORTANCE_NONE) return
         val style = Notifications.style(app, kind)
         val ringer = app.getSystemService(AudioManager::class.java).ringerMode
         if (sound && ringer == AudioManager.RINGER_MODE_NORMAL) style.soundUri?.let { uri ->

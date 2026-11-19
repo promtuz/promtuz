@@ -121,16 +121,17 @@ pub fn revise_with_staged(
     Ok(())
 }
 
-/// Share sheet waits for durable message creation before releasing its staged files.
+/// Share sheet waits for durable message creation before releasing its staged files. Returns the
+/// chats that failed, for a retry to send only to them.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn commit_shared(conversation_ids: Vec<Vec<u8>>, ids: Vec<u64>, caption: String) -> Result<(), CoreError> {
+pub async fn commit_shared(conversation_ids: Vec<Vec<u8>>, ids: Vec<u64>, caption: String) -> Result<Vec<Vec<u8>>, CoreError> {
     let to = conversation_ids.iter().map(|c| fixed::<16>(c, "conversation id")).collect::<Result<Vec<_>, _>>()?;
-    crate::api::messaging::on_runtime(async move {
+    let failed = crate::api::messaging::on_runtime(async move {
         if !ids.is_empty() {
             return crate::staging::commit_all(&to, ids, caption, None);
         }
         anyhow::ensure!(!caption.trim().is_empty(), "nothing to share");
-        for conv in to {
+        crate::staging::each_chat(&to, |conv, _| {
             let message = crate::data::message::Message::save_outgoing(conv, &caption, None)?;
             let payload = crate::messaging::body::rebuild_pending_payload(&conv, &message)?;
             core().spawn(async move {
@@ -138,8 +139,9 @@ pub async fn commit_shared(conversation_ids: Vec<Vec<u8>>, ids: Vec<u64>, captio
                     log::debug!("SHARE: text remains pending: {e}");
                 }
             });
-        }
-        Ok(())
+            Ok(())
+        })
     })
-    .await
+    .await?;
+    Ok(failed.into_iter().map(|c| c.to_vec()).collect())
 }
