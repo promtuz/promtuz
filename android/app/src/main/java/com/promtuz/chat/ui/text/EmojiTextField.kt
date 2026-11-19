@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.text
 
+import androidx.compose.runtime.getValue
 import android.graphics.Typeface
 import android.net.Uri
 import android.view.inputmethod.InputMethodManager
@@ -8,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier

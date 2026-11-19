@@ -80,7 +80,6 @@ fun NotificationsSettingsScreen(nav: AppNavigator) {
     var systemEnabled by remember { mutableStateOf(manager.areNotificationsEnabled()) }
     var channelsBlocked by remember { mutableStateOf(Notifications.messagesBlocked(context)) }
     var muted by remember { mutableStateOf<Map<Boolean, List<MutedChat>>>(emptyMap()) }
-    var relaysUp by remember { mutableStateOf<Int?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
 
     fun reload() {
@@ -99,7 +98,6 @@ fun NotificationsSettingsScreen(nav: AppNavigator) {
     }
     LaunchedEffect(Unit) {
         muted = mutedChats()
-        relaysUp = runCatching { CoreBridge.relays().count { it.isConnected } }.getOrNull()
     }
     val appSettings = {
         context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
@@ -175,16 +173,6 @@ fun NotificationsSettingsScreen(nav: AppNavigator) {
             }
             CardGap()
 
-            SettingsCard(header = "Delivery") {
-                SettingsRow(
-                    relaysUp?.let { if (it == 0) "Not connected" else if (it == 1) "Connected to 1 relay" else "Connected to $it relays" }
-                        ?: "Relays",
-                    icon = R.drawable.i_network_nodes,
-                    trailing = Trailing.Chevron,
-                    onClick = { nav.push(Routes.Relays) },
-                )
-            }
-            CardGap()
 
             SettingsCard {
                 SettingsRow("Reset notification settings", titleColor = Promtuz.colors.danger, onClick = { confirmReset = true })
@@ -209,7 +197,7 @@ fun NotificationsSettingsScreen(nav: AppNavigator) {
 }
 
 @Composable
-fun NotificationsKindScreen(groups: Boolean, nav: AppNavigator) {
+fun NotificationsKindScreen(groups: Boolean, openChat: (hex: String, name: String) -> Unit) {
     val context = LocalContext.current
     val kind = if (groups) AlertKind.Groups else AlertKind.Chats
     var on by remember { ChatPrefs.foldNotifSwitch(); mutableStateOf(if (groups) ChatPrefs.notifGroups else ChatPrefs.notifChats) }
@@ -270,10 +258,9 @@ fun NotificationsKindScreen(groups: Boolean, nav: AppNavigator) {
                     muted.forEach { chat ->
                         SettingsRow(
                             chat.name,
-                            subtitle = "Muted",
                             leading = { Avatar(chat.name, size = 40.dp, identityKey = chat.identity) },
                             leadingSize = 40.dp,
-                            onClick = { nav.push(Routes.Chat(chat.hex, chat.name)) },
+                            onClick = { openChat(chat.hex, chat.name) },
                         )
                     }
                 }
@@ -284,7 +271,7 @@ fun NotificationsKindScreen(groups: Boolean, nav: AppNavigator) {
 
 /** A warm card for a state that stops the feature working, with the one action that fixes it. */
 @Composable
-fun WarningBanner(icon: Int, title: String, body: String, action: String, onAction: () -> Unit): Unit {
+private fun WarningBanner(icon: Int, title: String, body: String, action: String, onAction: () -> Unit) {
     val c = Promtuz.colors
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.warnBg).padding(16.dp),

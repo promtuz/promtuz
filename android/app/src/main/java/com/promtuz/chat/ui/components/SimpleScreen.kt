@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material3.FabPosition
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.graphics.Color
 import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.material3.TopAppBarColors

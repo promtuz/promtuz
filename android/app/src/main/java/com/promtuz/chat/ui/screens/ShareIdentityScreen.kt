@@ -32,8 +32,10 @@ import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.utils.InviteLink
 import com.promtuz.core.CoreBridge
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val NameStyle = TextStyle(fontFamily = ttCommonsProFamily, fontWeight = FontWeight.SemiBold, fontSize = 22.sp, lineHeight = 28.sp)
 private val KeyStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp)
@@ -54,11 +56,12 @@ fun ShareIdentityScreen(
     LaunchedEffect(Unit) { profileVM.refresh() }
 
     // The QR and link are useless until our KeyPackage is published, so they wait for it.
-    var discoverable by remember { mutableStateOf(CoreBridge.kpPublishReady()) }
+    var discoverable by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        while (!discoverable) {
+        while (true) {
+            discoverable = withContext(Dispatchers.IO) { CoreBridge.kpPublishReady() }
+            if (discoverable) break
             delay(1000)
-            discoverable = CoreBridge.kpPublishReady()
         }
     }
     val invite = qr.takeIf { discoverable }
@@ -71,7 +74,7 @@ fun ShareIdentityScreen(
         ) {
             Box(contentAlignment = Alignment.TopCenter) {
                 Column(
-                    Modifier.padding(top = 44.dp).fillMaxWidth().clip(RoundedCornerShape(Radii.modal)).background(c.card)
+                    Modifier.padding(top = 44.dp).fillMaxWidth().clip(RoundedCornerShape(Radii.modal)).background(cardFill())
                         .padding(start = 20.dp, end = 20.dp, top = 56.dp, bottom = 20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {

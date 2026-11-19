@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.media
 
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.utils.media.PrivateMediaAccess
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -56,7 +58,7 @@ import androidx.compose.ui.graphics.StrokeCap
 object PrivateVideoPlayers {
     private val players = mutableSetOf<VideoPlayerState>()
     fun register(state: VideoPlayerState) {
-        if (com.promtuz.chat.security.PrivateChatSession.active.value == null) state.release() else players += state
+        if (PrivateChatSession.active.value == null) state.release() else players += state
     }
     fun remove(state: VideoPlayerState) { players -= state }
     fun clear() { players.toList().forEach { it.release() }; players.clear(); InlinePlayback.stop() }
@@ -98,7 +100,7 @@ fun rememberVideoPlayer(path: String, active: Boolean, adopt: VideoPlayerState? 
                 prepare()
             },
             path,
-        ).also { if (com.promtuz.chat.utils.media.PrivateMediaAccess.isPrivate(path)) PrivateVideoPlayers.register(it) }
+        ).also { if (PrivateMediaAccess.isPrivate(path)) PrivateVideoPlayers.register(it) }
     }
     DisposableEffect(state) {
         val player = state.player

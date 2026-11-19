@@ -1,5 +1,6 @@
 package com.promtuz.chat.utils.media
 
+import com.promtuz.chat.security.PrivateChatSession
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -44,11 +45,11 @@ suspend fun saveEncodedImageToGallery(context: Context, bytes: ByteArray, mime: 
 }
 
 private fun exportAuthorization(): () -> Unit {
-    val conversation = com.promtuz.chat.security.PrivateChatSession.active.value ?: return {}
-    val session = com.promtuz.chat.security.PrivateChatSession.sessionId
+    val conversation = PrivateChatSession.active.value ?: return {}
+    val session = PrivateChatSession.sessionId
     return {
-        check(session != null && com.promtuz.chat.security.PrivateChatSession.active.value == conversation &&
-            com.promtuz.chat.security.PrivateChatSession.sessionId == session) { "Chat is locked" }
+        check(session != null && PrivateChatSession.active.value == conversation &&
+            PrivateChatSession.sessionId == session) { "Chat is locked" }
     }
 }
 
@@ -104,7 +105,7 @@ private suspend fun writeToGallery(
     }
 
 suspend fun shareEncodedImage(context: Context, bytes: ByteArray, mime: String, name: String) {
-    if (com.promtuz.chat.security.PrivateChatSession.active.value != null) {
+    if (PrivateChatSession.active.value != null) {
         launchMediaShare(context, PrivateMediaAccess.shareBytes(context, bytes, mime, exportName(name, mime)), mime)
         return
     }
@@ -128,7 +129,7 @@ private fun exportName(name: String, mime: String): String {
 }
 
 suspend fun sharePicture(context: Context, image: ImageBitmap, name: String) {
-    if (com.promtuz.chat.security.PrivateChatSession.active.value != null) {
+    if (PrivateChatSession.active.value != null) {
         val authorize = exportAuthorization()
         val bytes = withContext(Dispatchers.Default) {
             java.io.ByteArrayOutputStream().use {
@@ -157,7 +158,7 @@ fun openMediaPath(context: Context, path: String, mime: String? = null) {
     val uri = if (PrivateMediaAccess.isPrivate(path)) PrivateMediaAccess.export(context, path)
         else FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
     val type = mime ?: context.contentResolver.getType(uri) ?: java.net.URLConnection.guessContentTypeFromName(path) ?: "*/*"
-    com.promtuz.chat.security.PrivateChatSession.beginHandoff()
+    PrivateChatSession.beginHandoff()
     context.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK))
 }
@@ -171,6 +172,6 @@ private fun launchMediaShare(context: Context, uri: android.net.Uri, mime: Strin
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply {
             clipData = android.content.ClipData.newRawUri("Attachment", uri)
         }
-    com.promtuz.chat.security.PrivateChatSession.beginHandoff()
+    PrivateChatSession.beginHandoff()
     context.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.theme.Promtuz
 
 import androidx.compose.foundation.background
@@ -15,13 +16,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.lerp
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -117,7 +116,7 @@ fun ProfileActions(actions: List<MenuAction>, modifier: Modifier = Modifier) {
         actions.forEach { action ->
             Column(
                 Modifier.weight(1f).height(68.dp)
-                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.tile))
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(Radii.tile))
                     .background(c.card)
                     .clickable(onClick = action.onClick),
                 horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,

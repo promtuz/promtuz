@@ -1,7 +1,6 @@
 package com.promtuz.chat.ui.animation
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.EaseInOutCirc
 import androidx.compose.animation.core.EaseOutExpo
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.tween
@@ -23,7 +22,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.util.lerp
-import com.promtuz.chat.ui.constants.Tweens
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.collectLatest
 import kotlin.math.ceil

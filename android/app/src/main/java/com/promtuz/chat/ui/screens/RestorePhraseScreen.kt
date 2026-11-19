@@ -1,8 +1,10 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.security.SecureRecoveryWindow
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.TextButton
 import com.promtuz.chat.ui.components.AppButton
-import com.promtuz.chat.ui.components.ButtonKind
 import com.promtuz.chat.ui.components.AppAlertDialog
 import android.app.Activity
 import androidx.compose.foundation.layout.Arrangement
@@ -16,17 +18,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import com.promtuz.chat.ui.components.AppTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -56,8 +55,8 @@ fun RestorePhraseScreen(onRestored: () -> Unit) {
     // The typed phrase is the private key, so keep it out of screenshots and recents.
     val window = (context as? Activity)?.window
     DisposableEffect(Unit) {
-        window?.let(com.promtuz.chat.security.SecureRecoveryWindow::acquire)
-        onDispose { window?.let(com.promtuz.chat.security.SecureRecoveryWindow::release) }
+        window?.let(SecureRecoveryWindow::acquire)
+        onDispose { window?.let(SecureRecoveryWindow::release) }
     }
 
     SimpleScreen({ Text("Restore your identity") }, connectionStatus = false) { padding ->

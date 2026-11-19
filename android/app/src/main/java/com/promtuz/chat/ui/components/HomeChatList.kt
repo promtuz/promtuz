@@ -1,5 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.domain.model.ChatSummary
+import com.promtuz.chat.navigation.LocalNavForeground
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Row
@@ -18,9 +22,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -31,10 +33,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -51,7 +51,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
     listState: LazyListState,
 ) {
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
-    val foreground = com.promtuz.chat.navigation.LocalNavForeground.current
+    val foreground = LocalNavForeground.current
     val arrivals by appViewModel.unseenOnHome.collectAsState()
     androidx.compose.runtime.LaunchedEffect(listState, lifecycle, arrivals, foreground) {
         if (!foreground) return@LaunchedEffect
@@ -119,7 +119,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
     }
 }
 
-private fun requesters(requests: List<com.promtuz.chat.domain.model.ChatSummary>): String {
+private fun requesters(requests: List<ChatSummary>): String {
     val first = requests.first().name
     return when (requests.size) {
         1 -> first

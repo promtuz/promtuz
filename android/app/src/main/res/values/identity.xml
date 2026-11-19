@@ -3,12 +3,8 @@
     <string name="identity_qr_title">My QR code</string>
     <string name="recovery_title">Recovery phrase</string>
     <string name="recovery_intro_body">Write these 24 words down in order and keep them private. They restore your identity, not your chats.</string>
-    <string name="recovery_private_body">Keep your phrase private. Anyone with it can use your identity.</string>
     <string name="recovery_locked_title">Hidden</string>
-    <string name="recovery_locked_body">Unlock with your screen lock or biometrics to view it.</string>
     <string name="recovery_reveal">Show recovery phrase</string>
-    <string name="recovery_verifying">Verifying…</string>
-    <string name="recovery_loading">Loading phrase…</string>
     <string name="recovery_no_lock_title">Needs a screen lock</string>
     <string name="recovery_open_settings">Set up screen lock</string>
     <string name="recovery_settings_unavailable">Couldn’t open settings. Set up a screen lock in Android Settings.</string>
@@ -18,11 +14,8 @@
     <string name="recovery_unavailable">Verification unavailable. Check your device’s screen lock and try again.</string>
     <string name="recovery_load_failed">Couldn’t load your phrase. Try again.</string>
     <string name="recovery_hide">Hide phrase</string>
-    <string name="recovery_cancel">Cancel</string>
     <string name="recovery_use_screen_lock">Use screen lock</string>
-    <string name="recovery_words_label">Recovery words</string>
     <string name="recovery_word_description">Word %1$d: %2$s</string>
-    <string name="recovery_words_instruction">Read across each row, from left to right.</string>
     <string name="recovery_auto_hide">Hidden when you leave the app or after 2 minutes.</string>
     <string name="recovery_auth_title">Reveal recovery phrase</string>
     <string name="recovery_auth_description">Unlock to view your recovery phrase.</string>

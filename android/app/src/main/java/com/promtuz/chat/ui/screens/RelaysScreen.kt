@@ -2,7 +2,6 @@ package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -67,7 +66,7 @@ private fun StatusCard(relays: List<UiRelay>) {
         else -> Triple("Connected", "$up of ${relays.size} relays are reachable. One is enough to send and receive messages.", c.success)
     }
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -104,13 +103,13 @@ private fun RelayRow(relay: UiRelay, showPort: Boolean, onConnect: () -> Unit, o
             ) {
                 Box(Modifier.size(tile)) {
                     Box(
-                        Modifier.matchParentSize().clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)).background(c.cardHigh),
+                        Modifier.matchParentSize().clip(RoundedCornerShape(Radii.small)).background(c.cardHigh),
                         contentAlignment = Alignment.Center,
                     ) { DrawableIcon(R.drawable.i_network_nodes, size = 22.dp, tint = c.muted) }
                     // The status mark sits on the tile's corner, ringed in the card colour.
                     Box(
                         Modifier.align(Alignment.BottomEnd).offset(3.dp, 3.dp).size(14.dp)
-                            .clip(RoundedCornerShape(5.dp)).background(c.card).padding(2.dp)
+                            .clip(RoundedCornerShape(5.dp)).background(cardFill()).padding(2.dp)
                             .clip(RoundedCornerShape(3.dp)).background(statusColor(relay.status)),
                     )
                 }

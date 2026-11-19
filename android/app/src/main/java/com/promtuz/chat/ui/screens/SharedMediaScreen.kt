@@ -29,7 +29,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.MessageLocation
 import com.promtuz.chat.domain.model.mediaLabel
@@ -93,7 +92,7 @@ fun SharedMediaScreen(conversation: String, name: String) {
             error = null
             try { openShared(context, conversation, name, row, thumb) }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: DownloadRequested) { error = "Downloading…" }
+            catch (e: DownloadRequested) { error = Downloading }
             catch (_: Exception) { error = "Couldn't open this attachment" }
         }
     }
@@ -103,7 +102,7 @@ fun SharedMediaScreen(conversation: String, name: String) {
         }
     }
     val errorLine: @Composable () -> Unit = {
-        error?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = FootnoteStyle, color = c.danger) }
+        error?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = FootnoteStyle, color = if (it == Downloading) c.muted else c.danger) }
     }
 
     GroupedScreen({ Text("Shared with $name", maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) },
@@ -144,10 +143,7 @@ private fun LazyListScope.listMonth(month: String, items: List<SharedMediaItem>,
     open: (SharedMediaItem, ImageBitmap?) -> Unit) {
     val count = items.size + 1
     item("m:$month") {
-        Box(Modifier.padding(top = 12.dp).fillMaxWidth().lazyCardRow(0, count)) {
-            Text(month, Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp),
-                style = SectionHeaderStyle, color = Promtuz.colors.accent)
-        }
+        LazyCardHeader(month, count, Modifier.padding(top = 12.dp))
     }
     itemsIndexed(items, key = { _, it -> it.dispatchId.toHex() }) { i, row ->
         Box(Modifier.lazyCardRow(i + 1, count, dividerStart = 70.dp)) { ListCell(conversation, row, open) }
@@ -179,7 +175,7 @@ private fun GridCell(conversation: String, row: SharedMediaItem, open: (SharedMe
         .clickable { open(row, thumb) }) {
         val media = record
         val sticker = media?.sticker
-        val path = media?.let { PrivateMediaAccess.path(conversation, it) }
+        val path = remember(conversation, media) { media?.let { PrivateMediaAccess.path(conversation, it) } }
         when {
             sticker != null -> StickerImage(sticker.toRef(), null, Modifier.fillMaxSize().padding(4.dp), animate = animate)
             media?.kind?.toInt() == 1 -> EncodedImage(bytes = media.blob, poster = thumb, contentDescription = null,
@@ -264,3 +260,5 @@ private suspend fun openShared(context: Context, conversation: String, name: Str
         throw DownloadRequested()
     } else error("Attachment unavailable")
 }
+
+private const val Downloading = "Downloading…"

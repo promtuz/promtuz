@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.runtime.getValue
 import com.promtuz.chat.ui.theme.Radii
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -16,7 +17,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -85,16 +85,14 @@ fun NewStickerPackScreen(
                     enabled = !publishing,
                     isError = nameLength > NameMax,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    suffix = { Text("$nameLength/$NameMax", style = RowSubtitleStyle, color = if (nameLength > NameMax) c.danger else c.muted) },
-                    shape = RoundedCornerShape(Radii.card),
-                    colors = AppTextFieldDefaults.colors().copy(label = c.accent),
+                    suffix = { AppTextFieldCounter(nameLength, NameMax) },
                 )
                 CardGap()
             }
 
             val tiles = picks.size + if (picks.size < room && !publishing) 1 else 0
             Column(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(12.dp),
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill()).padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 (0 until tiles).chunked(Columns).forEach { row ->
@@ -115,7 +113,7 @@ fun NewStickerPackScreen(
                     else -> "${picks.size} ${if (picks.size == 1) "sticker" else "stickers"}. Images keep their shape and are shown whole, never cropped."
                 },
                 Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
-                style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted,
+                style = FootnoteStyle, color = c.muted,
             )
             error?.let {
                 Text(it, Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp), style = RowSubtitleStyle, color = c.danger)
@@ -139,7 +137,7 @@ fun NewStickerPackScreen(
 private fun AddTile(decoding: Boolean, onClick: () -> Unit) {
     val c = Promtuz.colors
     Column(
-        Modifier.fillMaxSize().clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.tile)).background(c.cardHigh).clickable(enabled = !decoding, onClick = onClick),
+        Modifier.fillMaxSize().clip(RoundedCornerShape(Radii.tile)).background(c.cardHigh).clickable(enabled = !decoding, onClick = onClick),
         verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

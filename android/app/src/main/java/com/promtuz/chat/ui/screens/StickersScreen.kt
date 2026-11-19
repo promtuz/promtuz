@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -43,6 +44,7 @@ fun StickersScreen(
                 SettingsRow(
                     "Create a pack", titleColor = c.accent,
                     leading = { DrawableIcon(R.drawable.oi_sticker, size = 24.dp, tint = c.accent) },
+                    leadingSize = 44.dp,
                     onClick = onCreate,
                 )
                 packs.forEach { pack ->
@@ -50,13 +52,13 @@ fun StickersScreen(
                         pack.name,
                         subtitle = if (pack.stickers.size == 1) "1 sticker" else "${pack.stickers.size} stickers",
                         leading = {
-                            Box(Modifier.size(44.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small)).background(c.cardHigh), contentAlignment = Alignment.Center) {
+                            Box(Modifier.size(44.dp).clip(RoundedCornerShape(Radii.small)).background(c.cardHigh), contentAlignment = Alignment.Center) {
                                 pack.cover?.let { StickerImage(it, null, Modifier.size(32.dp), contentScale = ContentScale.Fit) }
                             }
                         },
                         leadingSize = 44.dp,
-                        trailing = Trailing.Chevron,
-                        onClick = { pack.cover?.let { sheet = it } },
+                        trailing = Trailing.Chevron.takeIf { pack.cover != null },
+                        onClick = pack.cover?.let { cover -> { sheet = cover } },
                     )
                 }
             }

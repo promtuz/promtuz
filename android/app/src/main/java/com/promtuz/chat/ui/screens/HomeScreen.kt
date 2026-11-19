@@ -1,6 +1,6 @@
 package com.promtuz.chat.ui.screens
 
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,7 +11,6 @@ import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.foundation.lazy.rememberLazyListState
 import com.promtuz.chat.ui.components.HomeSearchItemKey

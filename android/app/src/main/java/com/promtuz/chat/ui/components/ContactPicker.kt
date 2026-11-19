@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 
 import com.promtuz.chat.ui.theme.Promtuz
@@ -18,7 +19,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import com.promtuz.chat.ui.stage.ChatMotion

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.ui.components.TextButton
 import android.content.Context
 import androidx.compose.animation.*
@@ -238,21 +239,23 @@ fun PasswordField(value: String, onChange: (String) -> Unit, enabled: Boolean, o
 private object Throttle {
     // ponytail: wall clock, so changing the system time skips the wait; core-side counting if it matters.
     private fun prefs(c: Context) = c.getSharedPreferences("private_lock", Context.MODE_PRIVATE)
-    fun retryAt(c: Context) = prefs(c).getLong("retry_at", 0L)
+    // A clock set backwards can't stretch the wait past its longest step.
+    fun retryAt(c: Context) = prefs(c).getLong("retry_at", 0L).coerceAtMost(System.currentTimeMillis() + MAX_WAIT_S * 1000L)
     fun fail(c: Context): Long {
         val p = prefs(c)
         val tries = p.getInt("tries", 0) + 1
-        val wait = if (tries < 3) 0 else minOf(30, (tries - 2) * 5)
+        val wait = if (tries < 3) 0 else minOf(MAX_WAIT_S, (tries - 2) * 5)
         val at = if (wait > 0) System.currentTimeMillis() + wait * 1000L else 0L
         p.edit().putInt("tries", tries).putLong("retry_at", at).apply()
         return at
     }
     fun reset(c: Context) = prefs(c).edit().clear().apply()
+    private const val MAX_WAIT_S = 30
 }
 
 /** The chat's avatar with a lock badge; the gate and lock setup share it. */
 @Composable
-internal fun LockedAvatar(name: String, chat: com.promtuz.chat.domain.model.ChatSummary?, conversation: String, size: androidx.compose.ui.unit.Dp, opened: Boolean = false) {
+internal fun LockedAvatar(name: String, chat: ChatSummary?, conversation: String, size: androidx.compose.ui.unit.Dp, opened: Boolean = false) {
     val c = Promtuz.colors
     Box(Modifier.size(size)) {
         if (chat?.isGroup == true) GroupAvatar(name, emptyList(), size, conversation = conversation)

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.theme.Radii
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -53,7 +54,7 @@ fun LazyListScope.releaseHistory(notes: List<ReleaseNote>, currentCode: Long) {
 
 @Composable
 private fun ReleaseNoteCard(note: ReleaseNote, current: Boolean, showBuild: Boolean = false) {
-    val c = com.promtuz.chat.ui.theme.Promtuz.colors
+    val c = Promtuz.colors
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
@@ -66,7 +67,7 @@ private fun ReleaseNoteCard(note: ReleaseNote, current: Boolean, showBuild: Bool
             )
             val detail = listOfNotNull(niceDate(note.date).takeIf { it.isNotBlank() },
                 "Build ${note.code}".takeIf { showBuild }, "Installed".takeIf { current }).joinToString(" · ")
-            Text(detail, style = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted)
+            Text(detail, style = FootnoteStyle, color = c.muted)
         }
         Spacer(Modifier.height(12.dp))
         NotesBody(note.body)
@@ -80,7 +81,7 @@ fun UpdateNotes(notes: List<ReleaseNote>) = NotesBody(combineNotes(notes))
 /** Headings, bullets, paragraphs and `**bold**`; enough for release notes. */
 @Composable
 private fun NotesBody(markdown: String) {
-    val c = com.promtuz.chat.ui.theme.Promtuz.colors
+    val c = Promtuz.colors
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (line in markdown.lines().map { it.trim() }.filter { it.isNotEmpty() }) {
             when {

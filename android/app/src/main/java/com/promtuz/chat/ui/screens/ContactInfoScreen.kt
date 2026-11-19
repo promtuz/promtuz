@@ -1,8 +1,6 @@
 package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.components.TextButton
-import com.promtuz.chat.ui.components.AppButton
-import com.promtuz.chat.ui.components.ButtonKind
 import com.promtuz.chat.ui.components.AppAlertDialog
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -19,6 +17,7 @@ import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.ui.media.*
 import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.utils.extensions.reason
 import com.promtuz.chat.utils.media.rememberAvatar
 import com.promtuz.core.CoreBridge
 import com.promtuz.chat.domain.model.Presence
@@ -168,7 +167,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
         }) { Text("Save") } }, dismissButton = { TextButton(enabled = !busy, onClick = { nickname = null }) { Text("Cancel") } }) }
     if (deleting && chat != null) AppAlertDialog(onDismissRequest = { deleting = false }, title = { Text("Delete contact?") },
         text = { Text("This removes $name and your chat history from this device.") },
-        confirmButton = { TextButton(onClick = { deleting = false; app.deleteChat(chat) { app.navigator.openExternal(Routes.App) } }) { Text("Delete") } },
+        confirmButton = { TextButton(onClick = { deleting = false; app.deleteChat(chat) { app.navigator.openExternal(Routes.App) } }) { Text("Delete", color = Promtuz.colors.danger) } },
         dismissButton = { TextButton(onClick = { deleting = false }) { Text("Cancel") } })
     debug?.let { AppAlertDialog(onDismissRequest = { debug = null }, title = { Text("Debug info") }, text = { Text(it) },
         confirmButton = { TextButton(onClick = { debug = null }) { Text("Close") } }) }
@@ -182,7 +181,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
             scope.launch {
                 runCatching { CoreBridge.hideConversation(chat.conversationHex.fromHex(), null) }
                     .onSuccess { HiddenNotice.conversation.value = chat.conversationHex; hiding = false }
-                    .onFailure { error = it.message ?: "Couldn't hide this chat"; hiding = false }
+                    .onFailure { error = it.reason("Couldn't hide this chat"); hiding = false }
                 hideBusy = false
             }
         }

@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -17,10 +19,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import com.promtuz.chat.ui.components.AppButton
+import com.promtuz.chat.ui.components.cardFill
 import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.RowSubtitleStyle
 import com.promtuz.chat.ui.components.RowTitleStyle
@@ -89,7 +90,7 @@ private fun RequiredUpdateScreen(manifest: UpdateManifest, viewModel: UpdateVM) 
                 )
                 Spacer(Modifier.height(28.dp))
                 Column(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp),
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill()).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

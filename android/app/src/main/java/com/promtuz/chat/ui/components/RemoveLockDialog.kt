@@ -4,7 +4,6 @@ import com.promtuz.chat.ui.theme.Promtuz
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.unit.dp
@@ -12,6 +11,7 @@ import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.security.PrivateChatSession
 import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.utils.extensions.reason
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.launch
 
@@ -40,7 +40,7 @@ fun RemoveLockDialog(app: AppVM, conversationHex: String, name: String, onDismis
                         app.clearPrivateSummary()
                         onDismiss()
                     }
-                    .onFailure { error = it.message ?: "Couldn't remove the lock" }
+                    .onFailure { error = it.reason("Couldn't remove the lock") }
                 busy = false
             }
         }) { Text("Remove lock") } },

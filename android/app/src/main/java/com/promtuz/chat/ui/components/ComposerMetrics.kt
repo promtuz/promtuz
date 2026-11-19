@@ -1,11 +1,12 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.stage.SendTransition
 import androidx.compose.runtime.*
 
 /** Actual allocated geometry, published by the composer layout in its measure pass. */
 @Stable
 class ComposerMetrics {
-    internal var sendTransition: com.promtuz.chat.ui.stage.SendTransition? = null
+    internal var sendTransition: SendTransition? = null
     var composerPx by mutableIntStateOf(0)
         internal set
     var regionPx by mutableIntStateOf(0)

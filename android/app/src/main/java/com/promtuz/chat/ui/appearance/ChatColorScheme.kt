@@ -1,13 +1,10 @@
 package com.promtuz.chat.ui.appearance
 
 import androidx.compose.material3.ColorScheme
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.theme.PromtuzColors
 
 /** Chat renderers read colors from here, never the scheme, so a preset recolors only the conversation. */

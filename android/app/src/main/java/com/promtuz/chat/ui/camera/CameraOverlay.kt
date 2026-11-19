@@ -1,34 +1,25 @@
 package com.promtuz.chat.ui.camera
 
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.utils.media.PrivateMediaAccess
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.AppButton
-import com.promtuz.chat.ui.components.ButtonKind
 import android.Manifest
-import android.content.Context
 import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.Camera
-import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.lifecycle.awaitInstance
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.FileDescriptorOutputOptions
-import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
-import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
-import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -55,15 +46,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -108,7 +96,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import kotlin.math.abs
 
 private const val OPEN_MS = 280
 private val ease = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)
@@ -192,7 +179,7 @@ private fun CameraBody(request: CameraRequest, onClose: () -> Unit) {
         asked = true
     }
     fun requestPermission() {
-        com.promtuz.chat.security.PrivateChatSession.beginHandoff()
+        PrivateChatSession.beginHandoff()
         launcher.launch(Manifest.permission.CAMERA)
     }
     LaunchedEffect(Unit) { if (!granted) requestPermission() }
@@ -267,11 +254,11 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
 
     fun output(ext: String) = File(File(context.cacheDir, "attachments").apply { mkdirs() }, "${System.nanoTime()}_capture.$ext")
 
-    fun secureCapture(name: String, mime: String, nativeCodec: Boolean = false): com.promtuz.chat.utils.media.PrivateMediaAccess.Capture? =
+    fun secureCapture(name: String, mime: String, nativeCodec: Boolean = false): PrivateMediaAccess.Capture? =
         if (request.isPrivate) {
-            check(request.privateSession != null && com.promtuz.chat.security.PrivateChatSession.sessionId == request.privateSession &&
-                com.promtuz.chat.security.PrivateChatSession.active.value == request.conversation) { "Locked camera" }
-            com.promtuz.chat.utils.media.PrivateMediaAccess.capture(context, requireNotNull(request.conversation), name, mime,
+            check(request.privateSession != null && PrivateChatSession.sessionId == request.privateSession &&
+                PrivateChatSession.active.value == request.conversation) { "Locked camera" }
+            PrivateMediaAccess.capture(context, requireNotNull(request.conversation), name, mime,
                 nativeCodec = nativeCodec)
         } else null
 
@@ -390,7 +377,7 @@ private fun LiveCamera(request: CameraRequest, onClose: () -> Unit) {
     val audioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            com.promtuz.chat.security.PrivateChatSession.beginHandoff()
+            PrivateChatSession.beginHandoff()
             audioLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }

@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.text
 
+import androidx.compose.runtime.getValue
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,7 +10,6 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -118,7 +118,7 @@ fun EmojiText(
 
 /** One glyph from the pack, or the system's rendering of [cluster] until it has decoded. */
 @Composable
-internal fun EmojiGlyph(assetKey: String, cluster: String, style: TextStyle, colorFilter: androidx.compose.ui.graphics.ColorFilter? = null) {
+internal fun EmojiGlyph(assetKey: String, cluster: String, style: TextStyle) {
     val context = LocalContext.current
     // produceState's initial value is remembered, even when its producer key changes.
     // Give each asset its own state so an edit cannot display the previous emoji.
@@ -127,7 +127,7 @@ internal fun EmojiGlyph(assetKey: String, cluster: String, style: TextStyle, col
             value = EmojiPack.glyph(context, assetKey)
         }
         val bitmap = glyph
-        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit, colorFilter = colorFilter)
+        if (bitmap != null) Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
         else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(cluster, style = style, maxLines = 1, softWrap = false)
         }

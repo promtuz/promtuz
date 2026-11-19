@@ -1,7 +1,7 @@
 package com.promtuz.chat
 
+import com.promtuz.chat.security.ScreenSecurity
 import com.promtuz.chat.ui.components.TextButton
-import com.promtuz.chat.ui.components.IconButton
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
@@ -15,14 +15,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.unit.dp
@@ -44,7 +40,7 @@ class ShareActivity : ComponentActivity() {
     private val model: IncomingShareVM by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        com.promtuz.chat.security.ScreenSecurity.apply(window)
+        ScreenSecurity.apply(window)
         enableEdgeToEdge()
         model.receive(intent)
         setContent {
@@ -95,7 +91,9 @@ class IncomingShareVM(application: Application) : AndroidViewModel(application) 
             else listOfNotNull(intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
         val clips = intent.clipData?.let { clip -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri } }.orEmpty()
         val uris = (streams + clips).distinct()
-        if (uris.any { it.scheme != "content" || it.authority == "${getApplication<Application>().packageName}.fileprovider" }) {
+        // Our own providers are never a share source: one holds unlocked private media.
+        val own = getApplication<Application>().packageName.let { setOf("$it.fileprovider", "$it.private-media") }
+        if (uris.any { it.scheme != "content" || it.authority in own }) {
             error = "This app didn't provide a readable attachment"; return
         }
         if (uris.isEmpty()) {

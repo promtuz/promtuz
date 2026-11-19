@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.navigation.LocalNavForeground
+import com.promtuz.chat.navigation.Routes
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.foundation.layout.*
@@ -14,12 +16,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.sp
 import com.promtuz.chat.domain.model.MessageLocation
 import com.promtuz.chat.ui.theme.Promtuz
 import com.promtuz.chat.ui.text.parseMessageDate
@@ -50,7 +50,7 @@ import kotlinx.coroutines.sync.withLock
 @Composable
 fun HomeSearchScreen(app: AppVM) {
     DisposableEffect(Unit) {
-        val protection = com.promtuz.chat.security.PrivateChatSession.protectInput()
+        val protection = PrivateChatSession.protectInput()
         onDispose { protection.close() }
     }
     var query by remember { mutableStateOf("") }
@@ -60,7 +60,7 @@ fun HomeSearchScreen(app: AppVM) {
     val session by PrivateChatSession.active.collectAsState()
     val focus = remember { FocusRequester() }
     val menu = remember { HomeMenuState() }
-    val foreground = com.promtuz.chat.navigation.LocalNavForeground.current
+    val foreground = LocalNavForeground.current
     val currentQuery by rememberUpdatedState(query)
     val currentForeground by rememberUpdatedState(foreground)
     val unlockMutex = remember { Mutex() }
@@ -115,7 +115,7 @@ fun HomeSearchScreen(app: AppVM) {
         onDispose {
             // Opening the chat retains its session; leaving search without opening it does not.
             val top = app.backStack.lastOrNull()
-            if (top !is com.promtuz.chat.navigation.Routes.Chat) {
+            if (top !is Routes.Chat) {
                 PrivateChatSession.clear()
                 app.clearPrivateSummary()
             }
@@ -164,7 +164,7 @@ fun HomeSearchScreen(app: AppVM) {
                 }
             }
             if (results.isNotEmpty()) {
-                item("chats") { CardSectionLabel("Chats", Modifier.lazyCardRow(0, results.size + 1)) }
+                item("chats") { LazyCardHeader("Chats", results.size + 1) }
                 itemsIndexed(results, key = { _, it -> it.conversationHex }) { i, chat ->
                     HomeChatListItem(chat, presence = null, typing = false, pinned = chat.pinned,
                         muted = chat.muted, menuState = menu, privateChat = chat.conversationHex == privateResult?.conversationHex,
@@ -185,7 +185,7 @@ fun HomeSearchScreen(app: AppVM) {
             }
             if (hits.isNotEmpty()) {
                 if (results.isNotEmpty()) item("gap") { Spacer(Modifier.height(12.dp)) }
-                item("messages") { CardSectionLabel("Messages", Modifier.lazyCardRow(0, hits.size + 1)) }
+                item("messages") { LazyCardHeader("Messages", hits.size + 1) }
                 itemsIndexed(hits, key = { _, it -> "m" + it.dispatchHex }) { i, hit ->
                     MessageHitRow(hit, query, Modifier.lazyCardRow(i + 1, hits.size + 1, dividerStart = 76.dp, divider = i > 0)) {
                         PrivateChatSession.clear()
@@ -207,12 +207,6 @@ fun HomeSearchScreen(app: AppVM) {
 }
 
 private class MessageHit(val chat: ChatSummary, val dispatchHex: String, val text: String, val timestampMs: Long, val sender: String?)
-
-@Composable
-private fun CardSectionLabel(text: String, modifier: Modifier) {
-    Text(text, modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp),
-        style = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium), color = Promtuz.colors.accent)
-}
 
 @Composable
 private fun MessageHitRow(hit: MessageHit, query: String, modifier: Modifier, onClick: () -> Unit) {

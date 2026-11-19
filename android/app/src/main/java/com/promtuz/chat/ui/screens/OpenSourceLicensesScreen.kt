@@ -1,6 +1,9 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.IconButton
+import com.promtuz.chat.ui.components.cardFill
 import android.content.ActivityNotFoundException
 import android.widget.Toast
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
@@ -11,29 +14,22 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.components.listPadding
@@ -167,7 +163,7 @@ fun LibraryLicenseScreen(id: String) {
                     item {
                         SelectionContainer {
                             Column(
-                                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card)
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill())
                                     .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {

@@ -1,5 +1,11 @@
 package com.promtuz.chat.presentation.viewmodel
 
+import com.promtuz.chat.data.ChatPrefs
+import com.promtuz.chat.domain.model.STAGED_ATTACHMENT
+import com.promtuz.chat.domain.model.STAGED_IMAGE
+import com.promtuz.chat.presentation.state.ConnectionState
+import com.promtuz.chat.ui.camera.CapturedMedia
+import com.promtuz.chat.utils.media.PrivateMediaAccess
 import android.app.Application
 import android.net.Uri
 import android.os.SystemClock
@@ -26,7 +32,6 @@ import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.chat.utils.media.VoicePlayer
 import com.promtuz.chat.utils.media.VoiceRecorder
 import com.promtuz.chat.utils.media.decodeAvifCached
-import com.promtuz.chat.utils.media.stageCapturedVideo
 import com.promtuz.chat.utils.media.stagePickedAttachment
 import com.promtuz.chat.utils.media.stagePickedDocument
 import com.promtuz.chat.utils.media.MediaPreparationException
@@ -405,7 +410,7 @@ class ChatVM(
         }
         viewModelScope.launch {
             CoreBridge.connection.collect { connection ->
-                if (connection == com.promtuz.chat.presentation.state.ConnectionState.Connected) {
+                if (connection == ConnectionState.Connected) {
                     outgoingActivity.refresh()
                 }
             }
@@ -420,7 +425,7 @@ class ChatVM(
     private var exhausted = false
     private var loadingOlder = false
 
-    fun toggleMute() = com.promtuz.chat.data.ChatPrefs.toggleMute(conversationHex, !_muted.value)
+    fun toggleMute() = ChatPrefs.toggleMute(conversationHex, !_muted.value)
 
     private suspend fun resolveRoster() {
         val record = runCatching { CoreBridge.conversation(conversation) }.getOrNull() ?: return
@@ -459,7 +464,7 @@ class ChatVM(
         exhausted = rows.size < want
         val byMsg = CoreBridge.reactions(conversation).groupBy { it.dispatchId.toHex() }
         val forwards = CoreBridge.forwardOrigins(conversation).associate { it.dispatchId.toHex() to it.from }
-        val media = CoreBridge.getMedia(conversation, want).map { it.copy(localPath = com.promtuz.chat.utils.media.PrivateMediaAccess.path(conversationHex, it)) }.associateBy { it.dispatchId.toHex() }
+        val media = CoreBridge.getMedia(conversation, want).map { it.copy(localPath = PrivateMediaAccess.path(conversationHex, it)) }.associateBy { it.dispatchId.toHex() }
         // Quotes resolve within the loaded window; one outside it shows as unavailable.
         val byDid = rows.associateBy { it.dispatchId.toHex() }
         // toUi decodes AVIF, so this maps off the main thread.
@@ -650,7 +655,7 @@ class ChatVM(
         selected.forEach { uri -> acceptStaged(stagePickedAttachment(application, uri, conversation)) }
     }
 
-    fun attachCaptured(capture: com.promtuz.chat.ui.camera.CapturedMedia, video: Boolean) {
+    fun attachCaptured(capture: CapturedMedia, video: Boolean) {
         prepareMedia(listOf(capture.uri), photos = !video, onRejected = capture::close) {
             try { acceptStaged(stagePickedAttachment(application, capture.uri, conversation)) } finally { capture.close() }
         }
@@ -820,8 +825,8 @@ class ChatVM(
 
     private suspend fun acceptStaged(staged: StagedPickedAttachment) {
         val editing = composerAction.value as? ComposerAction.Edit
-        val kind = if (staged.image) com.promtuz.chat.domain.model.STAGED_IMAGE
-        else com.promtuz.chat.domain.model.STAGED_ATTACHMENT
+        val kind = if (staged.image) STAGED_IMAGE
+        else STAGED_ATTACHMENT
         if (editing != null && !editing.msg.content.acceptsStaged(kind)) {
             CoreBridge.discardStaged(staged.id)
             throw MediaPreparationException("Choose one compatible replacement for this message.")

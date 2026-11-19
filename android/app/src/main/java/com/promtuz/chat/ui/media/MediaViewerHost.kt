@@ -1,5 +1,10 @@
 package com.promtuz.chat.ui.media
 
+import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.ui.components.AppAlertDialog
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.TextButton
 import android.widget.Toast
 import androidx.activity.BackEventCompat
@@ -43,12 +48,10 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -56,7 +59,6 @@ import com.promtuz.chat.ui.stage.ChatMotion
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -107,7 +109,6 @@ import com.promtuz.chat.ui.components.MorphIcon
 import com.promtuz.chat.utils.media.saveToGallery
 import com.promtuz.chat.utils.media.saveFileToGallery
 import com.promtuz.chat.utils.media.saveEncodedImageToGallery
-import com.promtuz.chat.utils.media.shareFile
 import com.promtuz.chat.utils.media.sharePicture
 import com.promtuz.chat.utils.media.shareEncodedImage
 import com.promtuz.chat.utils.media.EncodedImage
@@ -159,7 +160,7 @@ fun MediaViewerHost() {
 
 @Composable
 private fun Viewer(session: MediaSession) {
-    val app = org.koin.compose.koinInject<com.promtuz.chat.presentation.viewmodel.AppVM>()
+    val app = org.koin.compose.koinInject<AppVM>()
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -639,7 +640,7 @@ private fun Chrome(
     if (item == null || alpha == 0f) return
     var showInfo by remember(item.key) { mutableStateOf(false) }
     var confirmSave by remember(item.key) { mutableStateOf(false) }
-    if (confirmSave) com.promtuz.chat.ui.components.AppAlertDialog(
+    if (confirmSave) AppAlertDialog(
         onDismissRequest = { confirmSave = false },
         title = { Text("Save to gallery?") },
         text = { Text("The saved copy will be available outside this locked chat.") },
@@ -685,7 +686,7 @@ private fun Chrome(
                     add(buildList {
                         if (exportAllowed) {
                             add(MenuAction("Save to gallery", R.drawable.oi_image_save) {
-                                if (com.promtuz.chat.security.PrivateChatSession.active.value != null) confirmSave = true else onSave(item)
+                                if (PrivateChatSession.active.value != null) confirmSave = true else onSave(item)
                             })
                             add(MenuAction("Share", R.drawable.oi_export) { onShare(item) })
                         }

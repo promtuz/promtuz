@@ -33,15 +33,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Fades only: a window scale would drag the blurred backdrop along with it. Scale runs in Compose instead. */
-@Composable
-internal fun ModalWindowMotion() {
-    val view = LocalView.current
-    SideEffect {
-        (view.parent as? DialogWindowProvider)?.window?.setWindowAnimations(R.style.AppModalAnimation)
-    }
-}
-
 /**
  * A full-screen window with its own scrim, so the frosted panel can blur the app behind it and the
  * scrim tap and system bars behave the same on every modal.

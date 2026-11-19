@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.camera
 
+import com.promtuz.chat.security.PrivateChatSession
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -14,8 +15,8 @@ class CapturedMedia(val uri: Uri, private val cleanup: () -> Unit) : Closeable {
 }
 
 class CameraRequest(val conversation: String?, val onCaptured: (CapturedMedia, Boolean) -> Unit) {
-    val privateSession = com.promtuz.chat.security.PrivateChatSession.sessionId.takeIf {
-        com.promtuz.chat.security.PrivateChatSession.active.value == conversation
+    val privateSession = PrivateChatSession.sessionId.takeIf {
+        PrivateChatSession.active.value == conversation
     }
     val isPrivate = conversation != null && com.promtuz.core.CoreBridge.privateConversationIds().any {
         it.contentEquals(conversation.fromHex())

@@ -1,5 +1,9 @@
 package com.promtuz.chat.navigation
 
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.ui.screens.ForwardScreen
+import com.promtuz.chat.ui.screens.LockChatScreen
+import com.promtuz.chat.ui.screens.LockedChatGate
 import com.promtuz.chat.utils.extensions.fromHex
 import androidx.compose.foundation.background
 import androidx.compose.material3.MaterialTheme
@@ -46,7 +50,7 @@ fun AppNavigation(
             }
             entry<Routes.RecoveryPhrase> { RecoveryPhraseScreen() }
             entry<Routes.Chat> { key ->
-                val session = com.promtuz.chat.security.PrivateChatSession
+                val session = PrivateChatSession
                 val active by session.active.collectAsState()
                 session.revision.collectAsState().value
                 // Process-local: a restored entry never carries a session, so it asks for the code again.
@@ -80,7 +84,7 @@ fun AppNavigation(
                         exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(420,
                             easing = androidx.compose.animation.core.EaseOutQuint)),
                     ) {
-                        com.promtuz.chat.ui.screens.LockedChatGate(appViewModel, key.conversation, key.name) { opened = it }
+                        LockedChatGate(appViewModel, key.conversation, key.name) { opened = it }
                     }
                 }
             }
@@ -92,7 +96,7 @@ fun AppNavigation(
             entry<Routes.ContactInfo> { key -> ContactInfoScreen(key.conversation, key.peer) }
             entry<Routes.PersonInfo> { key -> ContactInfoScreen(null, key.peer, key.name) }
             entry<Routes.SharedMedia> { key -> SharedMediaScreen(key.conversation, key.name) }
-            entry<Routes.Forward> { key -> com.promtuz.chat.ui.screens.ForwardScreen(key, appViewModel) }
+            entry<Routes.Forward> { key -> ForwardScreen(key, appViewModel) }
             entry<Routes.GroupInfo> { key -> GroupInfoScreen(key.conversation) }
             entry<Routes.GroupSettings> { key -> GroupSettingsScreen(key.conversation) }
             entry<Routes.ShareIdentity> {
@@ -115,7 +119,7 @@ fun AppNavigation(
                 )
             }
             entry<Routes.LockChat> { key ->
-                com.promtuz.chat.ui.screens.LockChatScreen(
+                LockChatScreen(
                     conversation = key.conversation,
                     onBack = { if (backStack.lastOrNull() == key) backStack.removeLastOrNull() },
                     onLocked = {
@@ -149,7 +153,7 @@ fun AppNavigation(
             ) }
             entry<Routes.LibraryLicense> { key -> LibraryLicenseScreen(key.id) }
             entry<Routes.NotificationsSettings> { NotificationsSettingsScreen(appViewModel.navigator) }
-            entry<Routes.NotificationsKind> { key -> NotificationsKindScreen(key.groups, appViewModel.navigator) }
+            entry<Routes.NotificationsKind> { key -> NotificationsKindScreen(key.groups, appViewModel::openChat) }
             entry<Routes.Logs> { LogsScreen() }
             entry<Routes.Relays> { RelaysScreen() }
             entry<Routes.BackupRestore> { BackupRestoreScreen() }

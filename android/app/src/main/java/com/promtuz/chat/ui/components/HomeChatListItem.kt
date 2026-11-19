@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.layout.boundsInRoot
 
 import androidx.compose.ui.graphics.layer.drawLayer
@@ -25,17 +27,11 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -291,8 +287,8 @@ private fun statusLine(chat: ChatSummary, typing: Boolean, c: PromtuzColors): Pa
 
 private fun declineText(reason: Int?): String = when (reason) {
     0 -> "Couldn’t start the chat. Try again."
-    1 -> "Couldn't connect — their invite was already used"
-    2 -> "Couldn't connect — they declined"
+    1 -> "Couldn't connect. Their invite was already used"
+    2 -> "Couldn't connect. They declined"
     else -> "Couldn't connect"
 }
 

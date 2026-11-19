@@ -1,8 +1,10 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.components.AppTopBar
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.IconButton
 import com.promtuz.chat.ui.components.AppButton
-import com.promtuz.chat.ui.components.ButtonKind
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -28,7 +30,6 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -37,10 +38,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -60,7 +59,6 @@ import com.promtuz.chat.ui.components.TopBarMorphIcon
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.state.PermissionState
 import com.promtuz.chat.presentation.viewmodel.QrScannerVM
-import com.promtuz.chat.ui.text.avgSizeInStyle
 import com.promtuz.chat.ui.views.QrScannerOverlayView
 import org.koin.androidx.compose.koinViewModel
 
@@ -163,7 +161,7 @@ private fun QrScannerTopBar(camera: Camera?, viewModel: QrScannerVM, onBack: () 
     var torchEnabled by remember { mutableStateOf(false) }
     val haveCamera by viewModel.isCameraAvailable.collectAsState()
 
-    com.promtuz.chat.ui.components.AppTopBar(
+    AppTopBar(
         connectionStatus = false,
         colors = TopAppBarDefaults.topAppBarColors(
             containerColor = Color.Transparent, scrolledContainerColor = Color.Transparent,

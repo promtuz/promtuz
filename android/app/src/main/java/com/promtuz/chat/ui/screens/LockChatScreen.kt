@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.IconButton
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -17,11 +18,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.promtuz.chat.R
 import com.promtuz.chat.navigation.LocalNavForeground
 import com.promtuz.chat.security.PrivateChatSession
 import com.promtuz.chat.ui.components.*
 import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.utils.extensions.reason
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -83,7 +84,7 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
                         onHidden()
                     } else onLocked()
                 }
-                .onFailure { first = null; fail(it.message ?: if (hide) "Couldn't hide this chat" else "Couldn't lock this chat") }
+                .onFailure { first = null; fail(it.reason(if (hide) "Couldn't hide this chat" else "Couldn't lock this chat")) }
             busy = false
         }
     }
@@ -94,7 +95,7 @@ fun LockChatScreen(conversation: String, onBack: () -> Unit, onLocked: () -> Uni
     }
     fun erase() { if (!busy && !done) code = code.dropLast(1) }
 
-    val app = org.koin.compose.koinInject<com.promtuz.chat.presentation.viewmodel.AppVM>()
+    val app = org.koin.compose.koinInject<AppVM>()
     val chats by app.chats.collectAsState()
     val chat = chats.firstOrNull { it.conversationHex == conversation }
     val keys = remember { FocusRequester() }

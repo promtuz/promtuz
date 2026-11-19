@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Radii
+import androidx.compose.runtime.getValue
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -25,7 +27,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -50,7 +51,6 @@ import com.promtuz.chat.utils.media.StickerImage
 import kotlinx.coroutines.launch
 
 internal val StickerGap = 8.dp
-private val TabSize = 40.dp
 private val SectionLabel = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium)
 
 private class Section(val key: String, val title: String, val stickers: List<StickerRef>, val start: Int)
@@ -112,20 +112,7 @@ fun StickerPanelBody(
             ) {
                 items(sections, key = { it.key }) { section ->
                     val selected = section.key == current
-                    val background by animateColorAsState(
-                        if (selected) c.glassFill else Color.Transparent,
-                        ChatMotion.spec(),
-                        label = "pack selection",
-                    )
-                    Box(
-                        Modifier
-                            .size(TabSize)
-                            .clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.small))
-                            .background(background)
-                            .clickable { scope.launch { grid.animateScrollToItem(section.start) } }
-                            .semantics { contentDescription = section.title },
-                        contentAlignment = Alignment.Center,
-                    ) {
+                    PanelTab(selected, section.title, { scope.launch { grid.animateScrollToItem(section.start) } }) {
                         if (section.key == "recent") DrawableIcon(R.drawable.oi_clock, tint = if (selected) c.text else c.muted, size = 20.dp)
                         else section.stickers.firstOrNull()?.let { cover ->
                             StickerImage(cover, null, Modifier.size(34.dp).clip(RoundedCornerShape(8.dp)))
@@ -181,4 +168,15 @@ fun StickerCell(ref: StickerRef, onClick: (() -> Unit)? = null) {
             placeholderColor = Promtuz.colors.text.copy(alpha = 0.05f),
         )
     }
+}
+
+/** One tile in the emoji or sticker panel's section strip. */
+@Composable
+internal fun PanelTab(selected: Boolean, title: String, onClick: () -> Unit, content: @Composable () -> Unit) {
+    val fill by animateColorAsState(if (selected) Promtuz.colors.glassFill else Color.Transparent, ChatMotion.spec(), label = "panel tab")
+    Box(
+        Modifier.size(40.dp).clip(RoundedCornerShape(Radii.small)).background(fill)
+            .clickable(onClick = onClick).semantics { contentDescription = title },
+        contentAlignment = Alignment.Center,
+    ) { content() }
 }

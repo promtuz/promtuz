@@ -1,6 +1,9 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.TextButton
+import com.promtuz.chat.ui.components.cardFill
 import com.promtuz.chat.ui.components.AppButton
 import com.promtuz.chat.ui.components.ButtonKind
 import android.content.ClipData
@@ -10,18 +13,14 @@ import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -36,20 +35,17 @@ import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
@@ -69,9 +65,14 @@ import com.promtuz.chat.ui.components.AppAlertDialog
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 
@@ -86,9 +87,12 @@ fun LogsScreen() {
     var tab by rememberSaveable { mutableStateOf(0) }
     val severity = Tabs[tab].second
     val source = paused ?: live
-    val logs = remember(source, query, severity) {
-        source.filter { log -> log.priority >= severity && (query.isBlank() ||
-            "${log.tag.orEmpty()} ${log.message} ${log.t?.stackTraceToString().orEmpty()}".contains(query.trim(), true)) }
+    // Stack traces are costly to stringify and every new line refilters, so this runs off Main.
+    val logs by produceState(emptyList(), source, query, severity) {
+        value = withContext(Dispatchers.Default) {
+            source.filter { log -> log.priority >= severity && (query.isBlank() ||
+                "${log.tag.orEmpty()} ${log.message} ${log.t?.stackTraceToString().orEmpty()}".contains(query.trim(), true)) }
+        }
     }
     val listState = rememberLazyListState()
     val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
@@ -125,7 +129,7 @@ fun LogsScreen() {
     export?.let { LogExportSheet(it) { export = null } }
     if (confirmClear) AppAlertDialog(onDismissRequest = { confirmClear = false },
         title = { Text("Clear logs?") }, text = { Text("This removes the current diagnostic logs. Your chats and settings stay on this device.") },
-        confirmButton = { TextButton(onClick = { AppLogger.clear(); paused = paused?.let { emptyList() }; confirmClear = false }) { Text("Clear") } },
+        confirmButton = { TextButton(onClick = { AppLogger.clear(); paused = paused?.let { emptyList() }; confirmClear = false }) { Text("Clear", color = Promtuz.colors.danger) } },
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })
 }
 
@@ -159,8 +163,11 @@ private fun LogExportSheet(logs: List<AppLog>, onDismiss: () -> Unit) {
             AppButton(
                 "Export as file",
                 onClick = {
-                    shareLogFile(context, formatLogs(logs))
-                    onDismiss()
+                    scope.launch {
+                        val file = withContext(Dispatchers.IO) { writeLogFile(context, formatLogs(logs)) }
+                        shareLogFile(context, file)
+                        onDismiss()
+                    }
                 },
                 Modifier.fillMaxWidth(),
                 kind = ButtonKind.Tonal,
@@ -169,9 +176,10 @@ private fun LogExportSheet(logs: List<AppLog>, onDismiss: () -> Unit) {
     }
 }
 
-private fun shareLogFile(context: Context, text: String) {
-    val file = File.createTempFile("promtuz-logs-", ".txt", File(context.cacheDir, "logs").apply { mkdirs() })
-    file.writeText(text)
+private fun writeLogFile(context: Context, text: String): File =
+    File.createTempFile("promtuz-logs-", ".txt", File(context.cacheDir, "logs").apply { mkdirs() }).apply { writeText(text) }
+
+private fun shareLogFile(context: Context, file: File) {
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
     val send = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
@@ -205,7 +213,7 @@ private fun formatLogs(logs: List<AppLog>): String {
 }
 
 @Composable
-fun LogsContainer(
+private fun LogsContainer(
     logs: List<AppLog>,
     modifier: Modifier = Modifier,
     padding: PaddingValues = PaddingValues(0.dp),
@@ -227,7 +235,7 @@ fun LogsContainer(
             SelectionContainer(
                 Modifier.fillMaxWidth()
                     .clip(RoundedCornerShape(if (top) r else 0.dp, if (top) r else 0.dp, if (bottom) r else 0.dp, if (bottom) r else 0.dp))
-                    .background(c.card)
+                    .background(cardFill())
                     .padding(start = 16.dp, end = 16.dp, top = if (top) 14.dp else 5.dp, bottom = if (bottom) 14.dp else 5.dp),
             ) { LogEntry(log) }
         }
@@ -235,7 +243,7 @@ fun LogsContainer(
 }
 
 @Composable
-fun LogEntry(log: AppLog) {
+private fun LogEntry(log: AppLog) {
     val c = Promtuz.colors
     val tone = when {
         log.priority >= 6 -> c.danger
@@ -266,11 +274,11 @@ fun LogEntry(log: AppLog) {
 }
 
 private const val TraceLines = 4
-private val Tabs = listOf("All" to 0, "Errors" to 6, "Info" to 4)
+private val Tabs = listOf("All" to 0, "Info" to 4, "Errors" to 6)
 private val LogText = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp)
 private val LogMeta = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
 
-fun prioLabel(p: Int) = when (p) {
+private fun prioLabel(p: Int) = when (p) {
     2 -> "V"
     3 -> "D"
     4 -> "I"
@@ -281,5 +289,6 @@ fun prioLabel(p: Int) = when (p) {
     else -> p.toString()
 }
 
-fun formatTime(ts: Long): String =
-    SimpleDateFormat("HH:mm:ss.SSS", Locale.ENGLISH).format(Date(ts))
+private val TimeFormat = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.ENGLISH).withZone(ZoneId.systemDefault())
+
+private fun formatTime(ts: Long): String = TimeFormat.format(Instant.ofEpochMilli(ts))

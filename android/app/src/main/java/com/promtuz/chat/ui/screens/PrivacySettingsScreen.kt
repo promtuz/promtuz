@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Promtuz
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -108,7 +109,7 @@ fun BlockedPeopleScreen() {
                         leading = { Avatar(person.name, size = 40.dp, identityKey = person.ipk.toHex()) },
                         leadingSize = 40.dp,
                         value = "Unblock",
-                        valueColor = com.promtuz.chat.ui.theme.Promtuz.colors.accent,
+                        valueColor = Promtuz.colors.accent,
                         onClick = { unblocking = person },
                     )
                 }

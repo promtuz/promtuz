@@ -1,9 +1,7 @@
 package com.promtuz.chat.ui.components
 
 import android.content.Context
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -32,7 +30,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.graphicsLayer
@@ -55,7 +52,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.promtuz.chat.R
 import com.promtuz.chat.data.ChatPrefs
-import com.promtuz.chat.ui.text.EmojiGlyph
 import com.promtuz.chat.ui.text.EmojiPack
 import com.promtuz.chat.ui.text.EmojiSequences
 import com.promtuz.chat.ui.theme.Promtuz
@@ -188,7 +184,7 @@ private fun EmojiPanelBody(onEmoji: (String) -> Unit, bottomPadding: Dp) {
 
     Column(Modifier.fillMaxSize()) {
         LazyRow(
-            Modifier.fillMaxWidth().height(52.dp),
+            Modifier.fillMaxWidth().height(56.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
             contentPadding = PaddingValues(horizontal = 8.dp),
@@ -196,13 +192,7 @@ private fun EmojiPanelBody(onEmoji: (String) -> Unit, bottomPadding: Dp) {
             items(sections.size, key = { sections[it].key }) { i ->
                 val section = sections[i]
                 val selected = section.key == current
-                val fill by animateColorAsState(if (selected) c.glassFill else Color.Transparent, label = "emojiTab")
-                Box(
-                    Modifier.size(40.dp).clip(RoundedCornerShape(Radii.small)).background(fill)
-                        .combinedClickable(onClick = { scope.launch { grid.animateScrollToItem(starts[i]) } })
-                        .semantics { contentDescription = section.title },
-                    contentAlignment = Alignment.Center,
-                ) {
+                PanelTab(selected, section.title, { scope.launch { grid.animateScrollToItem(starts[i]) } }) {
                     if (section.key == "recent") DrawableIcon(R.drawable.oi_clock, tint = if (selected) c.text else c.muted, size = 20.dp)
                     else Box(Modifier.size(22.dp).graphicsLayer { alpha = if (selected) 1f else 0.55f }) {
                         PackEmoji(section.cover, index, Modifier.fillMaxSize(), mono = !selected)

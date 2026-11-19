@@ -16,7 +16,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -253,7 +252,7 @@ private fun Overview(
         "Your messages and attachments are never cleared automatically." +
             if (media.isNotEmpty()) " Delete them from a chat above." else "",
         Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
-        style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted,
+        style = FootnoteStyle, color = c.muted,
     )
 }
 
@@ -264,7 +263,7 @@ private fun TotalCard(total: Long?, slices: List<Slice>, size: (Long) -> String)
     LaunchedEffect(Unit) { ready = true }
     val sum = slices.sumOf { it.bytes }.coerceAtLeast(1)
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill()).padding(16.dp),
     ) {
         Text(total?.let(size) ?: "…", style = TextStyle(fontSize = 32.sp, lineHeight = 38.sp, fontWeight = FontWeight.Medium), color = c.text)
         Text("Used by Promtuz on this phone", style = RowSubtitleStyle, color = c.muted)
@@ -284,7 +283,7 @@ private fun TotalCard(total: Long?, slices: List<Slice>, size: (Long) -> String)
                             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(8.dp).clip(CircleShape).background(slice.color))
                                 Text(slice.label, Modifier.padding(start = 8.dp).weight(1f), style = RowValueStyle, color = c.text)
-                                Text(size(slice.bytes), style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted)
+                                Text(size(slice.bytes), style = FootnoteStyle, color = c.muted)
                             }
                         }
                         if (pair.size == 1) Spacer(Modifier.weight(1f))
@@ -329,7 +328,7 @@ private fun ChatMedia(
         item("head", span = { GridItemSpan(maxLineSpan) }) {
             val first = items.firstOrNull()
             Row(
-                Modifier.padding(bottom = 9.dp).fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp),
+                Modifier.padding(bottom = 9.dp).fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill()).padding(16.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically,
             ) {
                 first?.let { ChatAvatar(it, 48.dp) }
@@ -354,7 +353,7 @@ private fun ChatMedia(
         if (items.isNotEmpty()) item("foot", span = { GridItemSpan(maxLineSpan) }) {
             Text("Tap to pick what to delete. Deleted media is gone from this phone for good.",
                 Modifier.padding(start = 16.dp, end = 16.dp, top = 9.dp),
-                style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted)
+                style = FootnoteStyle, color = c.muted)
         }
     }
 }

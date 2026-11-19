@@ -1,5 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.ui.camera.CameraLauncher
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -43,8 +47,6 @@ import com.promtuz.chat.ui.text.clock
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -182,7 +184,7 @@ fun ChatBottomBar(
     val onMic = {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        ) beginRecording() else { com.promtuz.chat.security.PrivateChatSession.beginHandoff(); micPermission.launch(Manifest.permission.RECORD_AUDIO) }
+        ) beginRecording() else { PrivateChatSession.beginHandoff(); micPermission.launch(Manifest.permission.RECORD_AUDIO) }
     }
     BackHandler(action != null && openPanel == null && recording == null) { viewModel.cancelComposerAction() }
     BackHandler(recording != null) { viewModel.cancelRecording() }
@@ -301,7 +303,7 @@ fun ChatBottomBar(
                     onPickGalleryFiles = { filePicker.launch(arrayOf("image/*", "video/*")) },
                     onSendPhotos = { uris -> viewModel.attachPhotos(uris); closeFlat() },
                     onOpenCamera = {
-                        if (viewModel.allowMedia()) com.promtuz.chat.ui.camera.CameraLauncher.open(conversation = viewModel.conversationHex) { file, video ->
+                        if (viewModel.allowMedia()) CameraLauncher.open(conversation = viewModel.conversationHex) { file, video ->
                             viewModel.attachCaptured(file, video)
                             closeFlat()
                         }

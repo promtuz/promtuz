@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.utils.media.AvatarPicture
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.text.format.DateUtils
@@ -39,6 +40,8 @@ import com.promtuz.chat.presentation.viewmodel.StickersVM
 import com.promtuz.chat.presentation.viewmodel.UpdateVM
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.ui.components.DrawableIcon
+import com.promtuz.chat.ui.components.cardFill
+import com.promtuz.chat.ui.components.FootnoteStyle
 import com.promtuz.chat.ui.components.Avatar
 import com.promtuz.chat.ui.components.CardGap
 import com.promtuz.chat.ui.components.SettingsCard
@@ -107,20 +110,12 @@ fun SettingsScreen(
             SettingRow("Storage", R.drawable.i_usage_chart, onClick = go(Routes.Storage)),
         ),
         listOf(
-            SettingRow("Relays", R.drawable.i_network_nodes, relaysUp?.let { "$it connected" }, onClick = go(Routes.Relays)),
+            SettingRow("Relays", R.drawable.i_network_nodes, relaysUp?.let { if (it == 0) "Not connected" else "$it connected" }, onClick = go(Routes.Relays)),
             SettingRow("Updates", R.drawable.i_update, update.offered?.let { "${it.versionName} available" },
                 valueColor = c.accent, onClick = go(Routes.Updates)),
         ),
         listOf(
-            SettingRow("Invite a friend", R.drawable.i_user_add) {
-                val link = "https://apt.promtuz.dev/apk/$channel/arm64-v8a/latest.apk"
-                open(Intent.createChooser(
-                    Intent(Intent.ACTION_SEND).setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, "Promtuz for Android")
-                        .putExtra(Intent.EXTRA_TEXT, "Let's talk on Promtuz\n$link"),
-                    "Invite a friend",
-                ))
-            },
+            SettingRow("Invite a friend", R.drawable.i_user_add) { open(inviteIntent(channel)) },
             SettingRow("Help and feedback", R.drawable.i_help) {
                 open(Intent(Intent.ACTION_VIEW, "https://github.com/promtuz/promtuz/issues".toUri()))
             },
@@ -143,9 +138,9 @@ fun SettingsScreen(
             groups.forEachIndexed { g, rows -> settingCard(g, rows) }
             item("footer") {
                 Text(
-                    "Promtuz ${BuildConfig.VERSION_NAME} · ${updates.installedChannel.replaceFirstChar { it.uppercase() }} channel",
+                    "Promtuz ${BuildConfig.VERSION_NAME} · ${channelLabel(updates.installedChannel)} channel",
                     Modifier.fillMaxWidth().padding(top = 18.dp),
-                    style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
+                    style = FootnoteStyle,
                     color = c.muted,
                     textAlign = TextAlign.Center,
                 )
@@ -172,7 +167,7 @@ private fun ProfileCard(
     name: String,
     bio: String,
     identity: String,
-    picture: com.promtuz.chat.utils.media.AvatarPicture?,
+    picture: AvatarPicture?,
     onOpen: () -> Unit,
     onQr: () -> Unit,
 ) {
@@ -182,7 +177,7 @@ private fun ProfileCard(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radii.card))
-            .background(c.card)
+            .background(cardFill())
             .clickable(role = Role.Button, onClick = onOpen)
             .padding(pad),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -207,3 +202,10 @@ private fun ProfileCard(
 
 private fun relativeDay(ms: Long): String =
     DateUtils.getRelativeTimeSpanString(ms, System.currentTimeMillis(), DateUtils.DAY_IN_MILLIS).toString()
+
+internal fun inviteIntent(channel: String): Intent = Intent.createChooser(
+    Intent(Intent.ACTION_SEND).setType("text/plain")
+        .putExtra(Intent.EXTRA_SUBJECT, "Promtuz for Android")
+        .putExtra(Intent.EXTRA_TEXT, "Let's talk on Promtuz\nhttps://apt.promtuz.dev/apk/$channel/arm64-v8a/latest.apk"),
+    "Invite a friend",
+)

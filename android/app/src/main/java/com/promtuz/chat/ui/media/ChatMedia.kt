@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.media
 
+import com.promtuz.chat.domain.model.MessageLocation
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.UiMessage
@@ -24,7 +25,7 @@ fun chatMediaItems(
         val did = msg.dispatchIdHex
         val title = if (msg.outgoing) "You" else msg.senderName ?: chatName
         val subtitle = dateAndTime(context, msg.timestampMs)
-        val location = com.promtuz.chat.domain.model.MessageLocation(conversation, chatName, did, msg.timestampMs)
+        val location = MessageLocation(conversation, chatName, did, msg.timestampMs)
         // Each item deletes itself: an album's photos are separate messages.
         fun delete(target: String) =
             listOf(listOf(MenuAction("Delete", R.drawable.oi_trash, destructive = true) { onDelete(target, msg.outgoing) }))

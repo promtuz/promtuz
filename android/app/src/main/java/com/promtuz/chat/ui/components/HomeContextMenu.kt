@@ -1,5 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Promtuz
+import com.promtuz.chat.ui.theme.Radii
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import dev.chrisbanes.haze.HazeState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.offset
@@ -15,10 +19,8 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.TransformOrigin
@@ -54,7 +56,7 @@ fun HomeContextMenu(state: HomeMenuState, haze: HazeState) {
         val snapshot = anchor.snapshot
         if (row != null && snapshot != null) {
             val density = androidx.compose.ui.platform.LocalDensity.current
-            val page = com.promtuz.chat.ui.theme.Promtuz.colors.card
+            val page = Promtuz.colors.card
             Box(
                 Modifier
                     .offset { androidx.compose.ui.unit.IntOffset((row.left - origin.x).roundToInt(), (row.top - origin.y).roundToInt()) }
@@ -64,7 +66,7 @@ fun HomeContextMenu(state: HomeMenuState, haze: HazeState) {
                         val p = state.scrim.value / Dim
                         alpha = p.coerceIn(0f, 1f)
                     }
-                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.card))
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(Radii.card))
                     .background(page)
                     .drawBehind { drawLayer(snapshot) },
             )

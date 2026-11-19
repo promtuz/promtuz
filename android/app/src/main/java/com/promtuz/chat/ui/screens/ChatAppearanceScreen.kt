@@ -1,7 +1,6 @@
 package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.theme.Radii
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,14 +15,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -158,7 +154,6 @@ private val TintPalette = listOf(
 
 private val QuickReactions = listOf("❤️", "👍", "🔥", "😂", "😮", "🎉")
 
-private val LabelStyle = TextStyle(fontSize = 16.sp, lineHeight = 22.sp)
 
 @Composable
 private fun PreviewCard(appearance: ChatAppearance) {
@@ -199,12 +194,12 @@ private fun ThemeTiles(selected: ThemeMode, modifier: Modifier, onPick: (ThemeMo
         ThemeMode.entries.forEach { mode ->
             val on = mode == selected
             Column(
-                Modifier.weight(1f).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge))
+                Modifier.weight(1f).clip(RoundedCornerShape(Radii.badge))
                     .clickable(role = Role.RadioButton) { onPick(mode) },
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val shape = RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)
+                val shape = RoundedCornerShape(Radii.badge)
                 Box(
                     Modifier.fillMaxWidth().height(72.dp).clip(shape)
                         .border(if (on) 2.5.dp else 0.dp, if (on) c.accentFill else Color.Transparent, shape),
@@ -222,7 +217,7 @@ private fun ThemeTiles(selected: ThemeMode, modifier: Modifier, onPick: (ThemeMo
                 Text(
                     mode.name,
                     Modifier.padding(bottom = 2.dp),
-                    style = LabelStyle.copy(fontWeight = if (on) FontWeight.Medium else FontWeight.Normal),
+                    style = RowTitleStyle.copy(fontWeight = if (on) FontWeight.Medium else FontWeight.Normal),
                     color = if (on) c.accent else c.text,
                 )
             }
@@ -253,7 +248,7 @@ private fun SwatchBlock(
     onPick: (Long?) -> Unit,
 ) {
     Column(modifier.fillMaxWidth().padding(top = 8.dp, bottom = 12.dp)) {
-        Text(label, Modifier.padding(horizontal = 16.dp), style = LabelStyle, color = Promtuz.colors.text)
+        Text(label, Modifier.padding(horizontal = 16.dp), style = RowTitleStyle, color = Promtuz.colors.text)
         Row(
             Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -293,8 +288,8 @@ private fun SliderBlock(
     val c = Promtuz.colors
     Column(modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 10.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, Modifier.weight(1f), style = LabelStyle, color = c.text)
-            Text(display(value), style = TextStyle(fontSize = 15.sp, lineHeight = 20.sp), color = c.accent)
+            Text(label, Modifier.weight(1f), style = RowTitleStyle, color = c.text)
+            Text(display(value), style = RowValueStyle, color = c.accent)
         }
         AppSlider(value, onChange, Modifier.padding(top = 6.dp), range = range, steps = steps)
     }

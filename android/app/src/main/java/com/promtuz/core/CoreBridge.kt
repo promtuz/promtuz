@@ -219,7 +219,6 @@ object CoreBridge {
     }
     suspend fun unhideConversation(id: ByteArray) = withContext(Dispatchers.IO) { uniffi.core.unhideConversation(id) }
     suspend fun hiddenTag(id: ByteArray): uniffi.core.HiddenTag? = withContext(Dispatchers.IO) { uniffi.core.hiddenTag(id) }
-    fun lockPrivateConversations() = uniffi.core.lockPrivateConversations()
     fun privateConversationIds(): List<ByteArray> = uniffi.core.privateConversationIds()
     fun isPrivateConversationUnlocked(id: ByteArray): Boolean = uniffi.core.isPrivateConversationUnlocked(id)
     fun privateCodeIsPin(id: ByteArray): Boolean = uniffi.core.privateCodeIsPin(id)

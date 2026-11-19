@@ -1,5 +1,12 @@
 package com.promtuz.chat
 
+import com.promtuz.chat.security.ScreenSecurity
+import com.promtuz.chat.security.SecureRecoveryWindow
+import com.promtuz.chat.ui.camera.CameraOverlayHost
+import com.promtuz.chat.ui.components.LocalRootHaze
+import com.promtuz.chat.ui.media.MediaViewer
+import com.promtuz.chat.utils.media.VoicePlayer
+import androidx.compose.runtime.getValue
 import androidx.compose.foundation.layout.fillMaxSize
 
 import android.content.Intent
@@ -18,7 +25,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
@@ -61,8 +67,8 @@ class LauncherActivity : ComponentActivity() {
         // Cover synchronously before another frame or a task snapshot can render old content.
         window.decorView.visibility = android.view.View.INVISIBLE
         viewModel.clearPrivateSummary()
-        com.promtuz.chat.ui.media.MediaViewer.close()
-        com.promtuz.chat.utils.media.VoicePlayer.stop()
+        MediaViewer.close()
+        VoicePlayer.stop()
         com.promtuz.chat.utils.media.clearDecodedImageCache()
         viewModel.navigator.reset(Routes.App)
         finishAndRemoveTask()
@@ -70,7 +76,7 @@ class LauncherActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        com.promtuz.chat.security.ScreenSecurity.apply(window)
+        ScreenSecurity.apply(window)
         PrivateChatSession.resumed(getSystemService(PowerManager::class.java).isInteractive)
         enforcePrivateExit()
     }
@@ -109,14 +115,14 @@ class LauncherActivity : ComponentActivity() {
             var held = false
             PrivateChatSession.secure.collectLatest { secure ->
                 if (secure && !held) {
-                    com.promtuz.chat.security.SecureRecoveryWindow.acquire(window)
+                    SecureRecoveryWindow.acquire(window)
                     held = true
                 } else if (!secure && held) {
                     // Release only after the private screen's exit animation and only in front,
                     // so no task snapshot can catch its last frame.
                     kotlinx.coroutines.delay(1000)
                     lifecycle.withResumed {
-                        com.promtuz.chat.security.SecureRecoveryWindow.release(window)
+                        SecureRecoveryWindow.release(window)
                         held = false
                     }
                 }
@@ -132,13 +138,13 @@ class LauncherActivity : ComponentActivity() {
             val appearance by AppearanceStore.appearance.collectAsState()
             PromtuzTheme(appearance = appearance) {
                 val rootHaze = dev.chrisbanes.haze.rememberHazeState()
-                androidx.compose.runtime.CompositionLocalProvider(com.promtuz.chat.ui.components.LocalRootHaze provides rootHaze) {
+                androidx.compose.runtime.CompositionLocalProvider(LocalRootHaze provides rootHaze) {
                     androidx.compose.foundation.layout.Box(
                         androidx.compose.ui.Modifier.fillMaxSize().hazeSource(rootHaze)
                     ) {
                         AppNavigation(viewModel)
                         MediaViewerHost()
-                        com.promtuz.chat.ui.camera.CameraOverlayHost()
+                        CameraOverlayHost()
                         InviteBottomSheet(viewModel)
                         RequiredUpdateHost()
                         MediaAlertHost()

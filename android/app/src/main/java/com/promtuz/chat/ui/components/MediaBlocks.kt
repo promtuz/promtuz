@@ -1,10 +1,11 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.text.MessageText
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
-import com.promtuz.chat.ui.text.EmojiText
 import com.promtuz.chat.ui.text.clock
 
 import androidx.compose.foundation.Canvas
@@ -17,9 +18,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -39,9 +38,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import com.promtuz.chat.utils.media.VoicePlayer
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
@@ -68,7 +65,6 @@ import com.promtuz.chat.ui.media.VideoSurface
 import com.promtuz.chat.ui.media.rememberVideoPlayer
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.snapshotFlow
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import androidx.compose.ui.res.painterResource
 import com.promtuz.chat.utils.media.EncodedImage
@@ -454,7 +450,7 @@ private fun Caption(
     val inline = mapOf(
         "meta" to InlineTextContent(Placeholder(metaWidth, metaHeight, PlaceholderVerticalAlign.TextBottom)) {}
     )
-    com.promtuz.chat.ui.text.MessageText(
+    MessageText(
         annotated,
         if (inset) Modifier.padding(start = BubblePadH, end = BubblePadH, top = 4.dp, bottom = BubblePadV)
         else Modifier.padding(top = 4.dp),

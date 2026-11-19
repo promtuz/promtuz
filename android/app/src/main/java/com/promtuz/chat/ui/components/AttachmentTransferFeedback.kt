@@ -254,7 +254,7 @@ private fun AttachmentTransferSheet(
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     Box(Modifier.size(56.dp).clip(MaterialTheme.shapes.medium)
-                        .background(Promtuz.colors.cardHigh), contentAlignment = Alignment.Center) {
+                        .background(cardFill()), contentAlignment = Alignment.Center) {
                         att.thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
                             ?: FileGlyph(att.mime, Promtuz.colors.muted, Promtuz.colors.accentFill)
                     }

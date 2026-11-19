@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.ui.theme.Radii
+import androidx.compose.runtime.getValue
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.widget.Toast
@@ -12,7 +14,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,7 +39,6 @@ fun AboutScreen(onOpenLicenses: () -> Unit, onOpenHistory: () -> Unit, updates: 
     val context = LocalContext.current
     val channel by updates.channel.collectAsState()
     // Share the phone build even from an emulator. Updating this device still uses its own ABI.
-    val downloadLink = "https://apt.promtuz.dev/apk/$channel/arm64-v8a/latest.apk"
 
     fun open(intent: Intent) {
         try {
@@ -66,9 +66,9 @@ fun AboutScreen(onOpenLicenses: () -> Unit, onOpenHistory: () -> Unit, updates: 
                         withStyle(SpanStyle(color = c.text, fontWeight = FontWeight.Medium)) { append("Version ${BuildConfig.VERSION_NAME}") }
                         append(" · ${channelLabel(updates.installedChannel)}")
                     },
-                    Modifier.padding(top = 14.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(c.card)
+                    Modifier.padding(top = 14.dp).clip(RoundedCornerShape(Radii.badge)).background(cardFill())
                         .padding(horizontal = 12.dp, vertical = 5.dp),
-                    style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp), color = c.muted,
+                    style = FootnoteStyle, color = c.muted,
                 )
             }
             SettingsCard {
@@ -82,14 +82,7 @@ fun AboutScreen(onOpenLicenses: () -> Unit, onOpenHistory: () -> Unit, updates: 
             }
             CardGap()
             SettingsCard {
-                SettingsRow("Share Promtuz", icon = R.drawable.oi_export, trailing = Trailing.Chevron, onClick = {
-                    open(Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).setType("text/plain")
-                            .putExtra(Intent.EXTRA_SUBJECT, "Promtuz for Android")
-                            .putExtra(Intent.EXTRA_TEXT, "Download Promtuz for Android\n$downloadLink"),
-                        "Share Promtuz",
-                    ))
-                })
+                SettingsRow("Share Promtuz", icon = R.drawable.oi_export, onClick = { open(inviteIntent(channel)) })
             }
         }
     }

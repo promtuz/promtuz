@@ -1,5 +1,8 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.TextButton
 import com.promtuz.chat.ui.components.GroupedScreen
@@ -13,16 +16,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.sp
 import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
@@ -40,6 +38,7 @@ fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
     val bytes by viewModel.bytes.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val outcome by viewModel.outcome.collectAsState()
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.refresh() }
 
     val saveCopy = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -53,25 +52,14 @@ fun BackupRestoreScreen(viewModel: BackupRestoreVM = koinViewModel()) {
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding.listPadding(top = 6.dp, bottom = 24.dp)),
         ) {
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val tint = if (lastBackup != null) c.success else c.muted
-                Box(
-                    Modifier.size(48.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(tint.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center,
-                ) { DrawableIcon(R.drawable.i_chat_backup, size = 24.dp, tint = tint) }
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(lastBackup?.let { "Backed up ${relative(it)}" } ?: "No backup yet",
-                        style = TextStyle(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium), color = c.text)
-                    Text(
-                        if (lastBackup != null) "${Formatter.formatShortFileSize(context, bytes)} · updates when you leave the app"
-                        else "Promtuz backs up when you leave the app",
-                        style = RowSubtitleStyle, color = c.muted,
-                    )
-                }
-            }
+            val tint = if (lastBackup != null) c.success else c.muted
+            StatusSummary(
+                lastBackup?.let { "Backed up ${relative(it)}" } ?: "No backup yet",
+                if (lastBackup != null) "${Formatter.formatShortFileSize(context, bytes)} · updates when you leave the app"
+                else "Promtuz backs up when you leave the app",
+                tint,
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill()).padding(16.dp),
+            ) { DrawableIcon(R.drawable.i_chat_backup, size = 24.dp, tint = tint) }
             CardGap()
             AppButton("Back up now", viewModel::snapshot, Modifier.fillMaxWidth(), busy = busy)
             CardGap()

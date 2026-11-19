@@ -6,7 +6,6 @@ import androidx.compose.ui.unit.dp
 object Radii {
     val card = 22.dp
     val button = 20.dp
-    val buttonJoin = 16.dp
     val field = 20.dp
     val iconButton = 14.dp
     val sheet = 28.dp

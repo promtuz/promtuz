@@ -1,5 +1,7 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.ui.theme.Radii
+import androidx.compose.runtime.getValue
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -11,7 +13,6 @@ import androidx.compose.material3.LoadingIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,7 +39,7 @@ fun IdentityQrCode(
 
     Box(
         modifier
-            .clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.modal))
+            .clip(RoundedCornerShape(Radii.modal))
             .background(containerColor)
             .padding(24.dp)
             .aspectRatio(1f)

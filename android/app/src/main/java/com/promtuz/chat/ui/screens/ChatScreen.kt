@@ -1,13 +1,17 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.navigation.LocalNavForeground
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.ui.components.ChatDatePicker
+import com.promtuz.chat.ui.components.DrawableIcon
+import com.promtuz.chat.ui.components.HiddenNotice
+import com.promtuz.chat.ui.stage.ChatMotion
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.TextButton
 import com.promtuz.chat.ui.components.AppAlertDialog
 import android.content.ClipData
 import android.content.Context
-import android.content.Intent
-import java.io.File
-import java.net.URLConnection
-import androidx.core.content.FileProvider
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
@@ -29,15 +33,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -109,7 +110,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     LaunchedEffect(pendingSearch) {
         if (pendingSearch == viewModel.conversationHex) { viewModel.openSearch(); pendingChatSearch.value = null }
     }
-    val foreground = com.promtuz.chat.navigation.LocalNavForeground.current
+    val foreground = LocalNavForeground.current
     if (foreground) androidx.lifecycle.compose.LifecycleResumeEffect(viewModel) {
         com.promtuz.core.push.PushNotifier.viewing(viewModel.conversationHex, true)
         viewModel.setChatForeground(true)
@@ -138,7 +139,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
     val calendar = rememberChatCalendar()
     var selectedDate by remember { mutableStateOf<java.time.LocalDate?>(null) }
 
-    if (com.promtuz.chat.security.PrivateChatSession.active.value != viewModel.conversationHex) NotificationPrimer()
+    if (PrivateChatSession.active.value != viewModel.conversationHex) NotificationPrimer()
 
     var groupingNow by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(messages.firstOrNull()?.key, typingMembers, mergeWindowMs, calendar) {
@@ -149,10 +150,10 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             groupingNow = System.currentTimeMillis()
         }
     }
-    val justHidden = com.promtuz.chat.ui.components.HiddenNotice.conversation.collectAsState().value == viewModel.conversationHex
+    val justHidden = HiddenNotice.conversation.collectAsState().value == viewModel.conversationHex
     DisposableEffect(viewModel.conversationHex) {
         onDispose {
-            com.promtuz.chat.ui.components.HiddenNotice.conversation.compareAndSet(viewModel.conversationHex, null)
+            HiddenNotice.conversation.compareAndSet(viewModel.conversationHex, null)
         }
     }
     val rows = remember(messages, mergeWindowMs, typing, typingMembers, isGroup, groupingNow, calendar, justHidden) {
@@ -308,7 +309,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                     is ChatRow.Msg -> {
                         val gapAbove by androidx.compose.animation.core.animateDpAsState(
                             if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp,
-                            com.promtuz.chat.ui.stage.ChatMotion.spec(), label = "message group gap",
+                            ChatMotion.spec(), label = "message group gap",
                         )
                         val highlight by animateColorAsState(
                             if (highlightKey == chatRow.msg.key)
@@ -376,7 +377,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
                     is ChatRow.Typing -> {
                         val gap by androidx.compose.animation.core.animateDpAsState(
                             if (chatRow.mergedTop) layout.messageGap.dp else layout.groupGap.dp,
-                            com.promtuz.chat.ui.stage.ChatMotion.spec(), label = "typing group gap",
+                            ChatMotion.spec(), label = "typing group gap",
                         )
                         TypingBubble(Modifier.padding(top = gap), mergedTop = chatRow.mergedTop)
                     }
@@ -425,7 +426,7 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
         }
 
         selectedDate?.let { date ->
-            com.promtuz.chat.ui.components.ChatDatePicker(
+            ChatDatePicker(
                 initialDate = date,
                 today = calendar.today,
                 onDismiss = { selectedDate = null },
@@ -455,7 +456,7 @@ private fun UiMessage.deleteTargets() =
 
 /** A file goes on only from this device's copy, and never out of a locked chat. */
 private fun UiMessage.forwardable(conversation: String): Boolean {
-    val locked = com.promtuz.chat.security.PrivateChatSession.active.value == conversation
+    val locked = PrivateChatSession.active.value == conversation
     fun ok(c: MessageContent): Boolean = when (c) {
         is MessageContent.Attachment -> !locked && (outgoing || c.localPath != null)
         is MessageContent.Album -> c.items.all { ok(it.content) }
@@ -500,12 +501,12 @@ private fun menuActionsFor(
             onInfo(msg); close()
         })
         // Copy offers whatever reads as text, a caption included.
-        val text = com.promtuz.chat.ui.components.BubbleTextLayouts.contentOf(msg)
+        val text = BubbleTextLayouts.contentOf(msg)
         if (!msg.deleted && text.isNotBlank())
             add(MenuAction("Copy", R.drawable.oi_copy) {
                 scope.launch {
                     val clip = ClipData.newPlainText("message", text)
-                    if (com.promtuz.chat.security.PrivateChatSession.active.value == viewModel.conversationHex) {
+                    if (PrivateChatSession.active.value == viewModel.conversationHex) {
                         clip.description.extras = android.os.PersistableBundle().apply {
                             putBoolean("android.content.extra.IS_SENSITIVE", true)
                         }
@@ -565,8 +566,8 @@ private fun CallRow(content: MessageContent.Call, modifier: Modifier = Modifier)
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        com.promtuz.chat.ui.components.DrawableIcon(
-            com.promtuz.chat.R.drawable.i_phone,
+        DrawableIcon(
+            R.drawable.i_phone,
             Modifier.size(18.dp).padding(end = 6.dp),
             tint = marker.copy(alpha = 0.6f),
         )
@@ -588,7 +589,7 @@ private fun HiddenNoticeCard(name: String, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            com.promtuz.chat.ui.components.DrawableIcon(com.promtuz.chat.R.drawable.oi_hidden_chat, size = 24.dp, tint = Promtuz.colors.text)
+            DrawableIcon(R.drawable.oi_hidden_chat, size = 24.dp, tint = Promtuz.colors.text)
             Text(
                 "You hid this chat. Search your code on the home screen to open it. $name isn't told.",
                 style = MaterialTheme.typography.bodyMedium, color = Promtuz.colors.text, textAlign = TextAlign.Center,

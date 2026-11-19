@@ -1,17 +1,17 @@
 package com.promtuz.chat.presentation.viewmodel
 
+import com.promtuz.chat.domain.model.MessageLocation
+import com.promtuz.chat.security.PrivateChatSession
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.app.Application
 import android.content.Context
 import android.widget.Toast
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavKey
 import com.promtuz.chat.R
-import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.domain.model.systemContent
@@ -47,21 +47,21 @@ class AppVM(
 
     var backStack = NavBackStack<NavKey>(if (CoreBridge.shouldLaunchApp()) Routes.App else Routes.Welcome)
     val navigator = AppNavigator(backStack)
-    private val _messageToShow = MutableStateFlow<com.promtuz.chat.domain.model.MessageLocation?>(null)
+    private val _messageToShow = MutableStateFlow<MessageLocation?>(null)
     val messageToShow = _messageToShow.asStateFlow()
 
-    fun showMessage(message: com.promtuz.chat.domain.model.MessageLocation) {
+    fun showMessage(message: MessageLocation) {
         _messageToShow.value = message
         // Reuse the existing chat entry and its scroll/draft state when it is already in the stack.
         val hidden = bridge.privateConversationIds().any { it.contentEquals(message.conversation.fromHex()) }
-        val privateGeneration = if (hidden) com.promtuz.chat.security.PrivateChatSession.sessionId else null
+        val privateGeneration = if (hidden) PrivateChatSession.sessionId else null
         val route = backStack.filterIsInstance<Routes.Chat>().lastOrNull {
             it.conversation == message.conversation && (!hidden || it.sessionId == privateGeneration)
         } ?: Routes.Chat(message.conversation, message.chatName, sessionId = privateGeneration)
         navigator.openExternal(route)
     }
 
-    fun consumeMessage(message: com.promtuz.chat.domain.model.MessageLocation) {
+    fun consumeMessage(message: MessageLocation) {
         _messageToShow.compareAndSet(message, null)
     }
 
@@ -168,9 +168,9 @@ class AppVM(
     val privateSummary = _privateSummary.asStateFlow()
 
     suspend fun privateSearchResult(id: ByteArray): ChatSummary? {
-        val generation = com.promtuz.chat.security.PrivateChatSession.generation
+        val generation = PrivateChatSession.generation
         val hex = id.toHex()
-        if (com.promtuz.chat.security.PrivateChatSession.active.value != hex) return null
+        if (PrivateChatSession.active.value != hex) return null
         val c = bridge.conversation(id) ?: return null
         val contact = c.peer?.let { peer -> bridge.contacts().firstOrNull { it.ipk.contentEquals(peer) } }
         val last = bridge.messages(id, 1).lastOrNull()
@@ -192,9 +192,9 @@ class AppVM(
             locked = true, unlocked = true, hidden = c.hidden,
         )
         // A background transition can revoke access while the IO reads are in flight.
-        if (com.promtuz.chat.security.PrivateChatSession.generation != generation ||
-            com.promtuz.chat.security.PrivateChatSession.active.value != hex ||
-            !com.promtuz.chat.security.PrivateChatSession.foreground) return null
+        if (PrivateChatSession.generation != generation ||
+            PrivateChatSession.active.value != hex ||
+            !PrivateChatSession.foreground) return null
         _privateSummary.value = summary
         return summary
     }
@@ -211,13 +211,15 @@ class AppVM(
         // A locked chat opens to its code screen.
         if (!canOpenChat(conversationHex)) return navigator.push(Routes.Chat(conversationHex, name))
         val hidden = bridge.privateConversationIds().any { it.contentEquals(conversationHex.fromHex()) }
-        if (hidden && !com.promtuz.chat.security.PrivateChatSession.arm(conversationHex)) {
-            com.promtuz.chat.security.PrivateChatSession.clear()
+        if (hidden && !PrivateChatSession.arm(conversationHex)) {
+            PrivateChatSession.clear()
             clearPrivateSummary()
+            // A search queued for this chat must not fire on some later open.
+            pendingChatSearch.compareAndSet(conversationHex, null)
             return
         }
         navigator.push(Routes.Chat(conversationHex, name,
-            sessionId = if (hidden) com.promtuz.chat.security.PrivateChatSession.sessionId else null))
+            sessionId = if (hidden) PrivateChatSession.sessionId else null))
     }
 
     fun openChatWith(peerHex: String, name: String) = viewModelScope.launch {

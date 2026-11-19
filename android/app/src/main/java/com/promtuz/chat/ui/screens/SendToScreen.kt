@@ -1,5 +1,8 @@
 package com.promtuz.chat.ui.screens
 
+import com.promtuz.chat.navigation.Routes
+import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.ui.animation.QueuedAnimatedNumber
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.spring
@@ -14,18 +17,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.onSizeChanged
@@ -246,7 +245,7 @@ private fun SendToBar(
                                 .padding(horizontal = 6.dp),
                             contentAlignment = Alignment.Center,
                         ) {
-                            com.promtuz.chat.ui.animation.QueuedAnimatedNumber(shownCount.coerceAtLeast(2),
+                            QueuedAnimatedNumber(shownCount.coerceAtLeast(2),
                                 style = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, lineHeight = 14.sp, fontWeight = FontWeight.Medium),
                                 color = c.accentFill, label = "send count")
                         }
@@ -285,7 +284,7 @@ fun SubjectThumbStack(thumbs: List<androidx.compose.ui.graphics.ImageBitmap?>) {
 }
 
 @Composable
-fun ForwardScreen(key: com.promtuz.chat.navigation.Routes.Forward, app: com.promtuz.chat.presentation.viewmodel.AppVM) {
+fun ForwardScreen(key: Routes.Forward, app: AppVM) {
     val targets by remember { sendTargets() }.collectAsState(emptyList())
     val selected = rememberSaveable(saver = listSaver({ it.toList() }, { it.toMutableStateList() })) { mutableStateListOf<String>() }
     var comment by rememberSaveable { mutableStateOf("") }
@@ -320,11 +319,7 @@ fun ForwardScreen(key: com.promtuz.chat.navigation.Routes.Forward, app: com.prom
                 app.navigator.back()
                 if (only != null) app.openChat(only.conversation, only.name)
             } catch (e: uniffi.core.CoreException) {
-                error = when (e) {
-                    is uniffi.core.CoreException.Refused -> e.msg
-                    is uniffi.core.CoreException.Internal -> e.msg
-                    else -> null
-                } ?: "Couldn't forward this"
+                error = (e as? uniffi.core.CoreException.Refused)?.msg ?: "Couldn't forward this"
             } finally { busy = false }
         }
     }

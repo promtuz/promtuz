@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.media
 
+import com.promtuz.chat.domain.model.MessageLocation
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -39,7 +40,7 @@ data class MediaItem(
     val byteSize: Long? = null,
     /** Extra overflow menu groups after the built-in entries. */
     val actions: List<List<MenuAction>> = emptyList(),
-    val message: com.promtuz.chat.domain.model.MessageLocation? = null,
+    val message: MessageLocation? = null,
     val encoded: ByteArray? = null,
 )
 

@@ -1,5 +1,12 @@
 package com.promtuz.chat.security
 
+import com.promtuz.chat.ui.camera.CameraLauncher
+import com.promtuz.chat.ui.media.MediaViewer
+import com.promtuz.chat.ui.media.PrivateVideoPlayers
+import com.promtuz.chat.utils.media.AvatarImages
+import com.promtuz.chat.utils.media.PrivateMediaAccess
+import com.promtuz.chat.utils.media.StickerImages
+import com.promtuz.chat.utils.media.VoicePlayer
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -56,15 +63,15 @@ object PrivateChatSession {
         uniffi.core.lockPrivateConversations()
         _active.value = null
         _revision.value++
-        com.promtuz.chat.utils.media.PrivateMediaAccess.clear()
-        com.promtuz.chat.ui.camera.CameraLauncher.close()
+        PrivateMediaAccess.clear()
+        CameraLauncher.close()
         if (hadPrivateContent) {
-            com.promtuz.chat.ui.media.PrivateVideoPlayers.clear()
-            com.promtuz.chat.ui.media.MediaViewer.close()
-            com.promtuz.chat.utils.media.VoicePlayer.stop()
+            PrivateVideoPlayers.clear()
+            MediaViewer.close()
+            VoicePlayer.stop()
             com.promtuz.chat.utils.media.clearDecodedImageCache()
-            com.promtuz.chat.utils.media.AvatarImages.invalidateAll()
-            com.promtuz.chat.utils.media.StickerImages.clear()
+            AvatarImages.invalidateAll()
+            StickerImages.clear()
         }
         _secure.value = inputOwners > 0
     }

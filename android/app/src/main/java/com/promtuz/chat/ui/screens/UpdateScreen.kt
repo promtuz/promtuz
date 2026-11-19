@@ -70,34 +70,31 @@ fun UpdateScreen(viewModel: UpdateVM = koinViewModel()) {
                     val switching = manifest?.versionCode == BuildConfig.VERSION_CODE && channel != viewModel.installedChannel
                     val offer = shown is UpdateState.Available || shown is UpdateState.Downloading || shown is UpdateState.Ready
                     Column {
-                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(c.card).padding(16.dp)) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                val tint = when (shown) {
-                                    UpdateState.None -> c.success
-                                    is UpdateState.Error -> c.danger
-                                    else -> if (offer) c.accent else c.muted
-                                }
-                                Box(Modifier.size(48.dp).clip(RoundedCornerShape(com.promtuz.chat.ui.theme.Radii.badge)).background(tint.copy(alpha = 0.16f)),
-                                    contentAlignment = Alignment.Center) {
-                                    when (shown) {
-                                        UpdateState.None -> MorphIcon(MorphGlyph.Check, null, Modifier.size(24.dp), tint = tint)
-                                        is UpdateState.Error -> DrawableIcon(R.drawable.oi_info, size = 24.dp, tint = tint)
-                                        else -> DrawableIcon(R.drawable.i_download, size = 24.dp, tint = tint)
-                                    }
-                                }
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(when (shown) {
-                                        UpdateState.Unchecked -> "Check for updates"
-                                        UpdateState.None -> "Promtuz is up to date"
-                                        UpdateState.Checking -> "Checking for updates…"
-                                        is UpdateState.Error -> "Couldn’t update Promtuz"
-                                        else -> if (switching) "Promtuz ${channelLabel(channel)} is ready" else "Promtuz ${manifest?.versionName} is ready"
-                                    }, style = TextStyle(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium), color = c.text)
-                                    Text(when (shown) {
-                                        is UpdateState.Error -> shown.message
-                                        else -> manifest?.let { versionLine(context, it, channelLabel(channel)) }
-                                            ?: "${BuildConfig.VERSION_NAME} · ${channelLabel(viewModel.installedChannel)}"
-                                    }, style = RowSubtitleStyle, color = c.muted)
+                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(Radii.card)).background(cardFill()).padding(16.dp)) {
+                            val tint = when (shown) {
+                                UpdateState.None -> c.success
+                                is UpdateState.Error -> c.danger
+                                else -> if (offer) c.accent else c.muted
+                            }
+                            StatusSummary(
+                                when (shown) {
+                                    UpdateState.Unchecked -> "Check for updates"
+                                    UpdateState.None -> "Promtuz is up to date"
+                                    UpdateState.Checking -> "Checking for updates…"
+                                    is UpdateState.Error -> "Couldn’t update Promtuz"
+                                    else -> if (switching) "Promtuz ${channelLabel(channel)} is ready" else "Promtuz ${manifest?.versionName} is ready"
+                                },
+                                when (shown) {
+                                    is UpdateState.Error -> shown.message
+                                    else -> manifest?.let { versionLine(context, it, channelLabel(channel)) }
+                                        ?: "${BuildConfig.VERSION_NAME} · ${channelLabel(viewModel.installedChannel)}"
+                                },
+                                tint,
+                            ) {
+                                when (shown) {
+                                    UpdateState.None -> MorphIcon(MorphGlyph.Check, null, Modifier.size(24.dp), tint = tint)
+                                    is UpdateState.Error -> DrawableIcon(R.drawable.oi_info, size = 24.dp, tint = tint)
+                                    else -> DrawableIcon(R.drawable.i_download, size = 24.dp, tint = tint)
                                 }
                             }
                             if (offer && notes.isNotEmpty()) {

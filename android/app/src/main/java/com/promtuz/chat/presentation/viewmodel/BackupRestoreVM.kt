@@ -58,6 +58,11 @@ class BackupRestoreVM(private val application: Application) : ViewModel() {
                 error("atomic rename failed")
             }
         }
+        refresh()
+    }
+
+    /** The worker rewrites the blob whenever the app goes to the background. */
+    fun refresh() {
         _lastBackup.value = lastModified()
         _bytes.value = blobFile().length()
     }

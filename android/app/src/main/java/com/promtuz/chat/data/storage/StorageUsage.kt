@@ -1,5 +1,6 @@
 package com.promtuz.chat.data.storage
 
+import com.promtuz.chat.utils.media.StickerImages
 import android.content.Context
 import android.os.StatFs
 import kotlinx.coroutines.flow.Flow
@@ -69,7 +70,7 @@ internal class StorageRepository(context: Context) : StorageSource {
 
     override suspend fun clearStickerCache() {
         com.promtuz.core.CoreBridge.clearStickerCache()
-        com.promtuz.chat.utils.media.StickerImages.clear()
+        StickerImages.clear()
     }
 
     override suspend fun read(): StorageUsage = withContext(Dispatchers.IO) {

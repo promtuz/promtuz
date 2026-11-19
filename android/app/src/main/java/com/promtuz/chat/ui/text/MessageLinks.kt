@@ -1,5 +1,9 @@
 package com.promtuz.chat.ui.text
 
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.ui.components.PressHighlight
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.content.ClipData
 import android.text.SpannableString
 import android.text.style.URLSpan
@@ -13,12 +17,10 @@ import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -166,7 +168,7 @@ private fun MessageLinkTarget(link: MessageLink, label: String, geometry: LinkGe
         }
     }
     val open = {
-        com.promtuz.chat.security.PrivateChatSession.beginHandoff()
+        PrivateChatSession.beginHandoff()
         runCatching { uriHandler.openUri(link.url) }.onFailure {
             Toast.makeText(context, "Couldn't open this link", Toast.LENGTH_SHORT).show()
         }
@@ -194,7 +196,7 @@ private fun MessageLinkTarget(link: MessageLink, label: String, geometry: LinkGe
             onClick = open,
             onClickLabel = "Open link",
             onLongClickLabel = "Link options",
-            indication = com.promtuz.chat.ui.components.PressHighlight,
+            indication = PressHighlight,
         )
     }
 }

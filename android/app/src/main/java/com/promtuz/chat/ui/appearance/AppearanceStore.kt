@@ -2,6 +2,8 @@ package com.promtuz.chat.ui.appearance
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.edit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,9 +25,15 @@ object AppearanceStore {
             ?: ChatAppearance.Default
     }
 
+    private val handler = Handler(Looper.getMainLooper())
+    private val save = Runnable {
+        prefs.edit { putString(KEY, json.encodeToString(ChatAppearance.serializer(), state.value)) }
+    }
+
+    /** Applies at once; the write waits for a pause, since a slider drag updates every frame. */
     fun update(transform: (ChatAppearance) -> ChatAppearance) {
-        val next = transform(state.value)
-        state.value = next
-        prefs.edit { putString(KEY, json.encodeToString(ChatAppearance.serializer(), next)) }
+        state.value = transform(state.value)
+        handler.removeCallbacks(save)
+        handler.postDelayed(save, 300)
     }
 }

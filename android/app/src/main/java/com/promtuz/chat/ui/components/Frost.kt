@@ -11,7 +11,6 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.drawWithCache

@@ -1,7 +1,6 @@
 package com.promtuz.chat.ui.screens
 
 import com.promtuz.chat.ui.components.AppButton
-import com.promtuz.chat.ui.components.ButtonKind
 import android.content.Intent
 import android.util.Base64
 import androidx.compose.foundation.layout.*

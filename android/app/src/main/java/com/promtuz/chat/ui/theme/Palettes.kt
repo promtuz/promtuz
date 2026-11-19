@@ -41,7 +41,7 @@ private val ClassicDark = DarkPromtuzColors.copy(
     page = Color(0xFF12171D), groupedPage = Color(0xFF12171D), card = Color(0xFF1B2129),
     cardHigh = Color(0xFF242C35), divider = Color(0xFF28313B), text = Color(0xFFE7ECF1),
     muted = Color(0xFF8C98A5), thumbOff = Color(0xFF8C98A5), accent = Color(0xFF6BA3EC),
-    accentFill = Color(0xFF5A91D8), switchOff = Color(0xFF38424D), glass = Color(0xB81B2129),
+    accentFill = Color(0xFF5A91D8), switchOff = Color(0xFF38424D),
     bubbleOut = Color(0xFF2C4669), onBubbleOut = Color(0xFFE3ECF8), bubbleIn = Color(0xFF1F252D),
     wallpaper = Color(0xFF12171D),
 )
@@ -57,7 +57,7 @@ private val InkDark = DarkPromtuzColors.copy(
     page = Color(0xFF0C0E13), groupedPage = Color(0xFF0C0E13), card = Color(0xFF161922),
     cardHigh = Color(0xFF1F2330), divider = Color(0xFF222634), text = Color(0xFFEEF0F5),
     muted = Color(0xFF8A90A0), thumbOff = Color(0xFF8A90A0), accent = Color(0xFF5B95FF),
-    accentFill = Color(0xFF2F6BFF), switchOff = Color(0xFF343A4A), glass = Color(0xB8161922),
+    accentFill = Color(0xFF2F6BFF), switchOff = Color(0xFF343A4A),
     bubbleOut = Color(0xFF2F6BFF), onBubbleOut = Color(0xFFFFFFFF), bubbleIn = Color(0xFF1A1E28),
     wallpaper = Color(0xFF0C0E13),
 )

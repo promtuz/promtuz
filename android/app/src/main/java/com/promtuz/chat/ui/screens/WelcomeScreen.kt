@@ -1,9 +1,8 @@
 package com.promtuz.chat.ui.screens
 
+import androidx.compose.runtime.getValue
 import com.promtuz.chat.ui.components.AppButton
 import com.promtuz.chat.ui.components.ButtonKind
-import android.app.Activity
-import android.content.Intent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -31,7 +30,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier

@@ -1,5 +1,6 @@
 package com.promtuz.chat.utils.media
 
+import com.promtuz.chat.security.PrivateChatSession
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -41,14 +42,14 @@ object VoicePlayer {
             return
         }
         stop()
-        val privateConversation = com.promtuz.chat.security.PrivateChatSession.active.value
-        val privateSession = com.promtuz.chat.security.PrivateChatSession.sessionId
+        val privateConversation = PrivateChatSession.active.value
+        val privateSession = PrivateChatSession.sessionId
         val source = object : MediaDataSource() {
             private var data = bytes.copyOf()
             @Synchronized override fun getSize(): Long = data.size.toLong()
             @Synchronized override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-                if (privateConversation != null && (com.promtuz.chat.security.PrivateChatSession.active.value != privateConversation ||
-                    com.promtuz.chat.security.PrivateChatSession.sessionId != privateSession)) {
+                if (privateConversation != null && (PrivateChatSession.active.value != privateConversation ||
+                    PrivateChatSession.sessionId != privateSession)) {
                     data.fill(0); data = byteArrayOf(); return -1
                 }
                 if (position < 0 || position >= data.size) return -1

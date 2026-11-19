@@ -1,8 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Animatable
@@ -13,7 +14,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -35,7 +35,6 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment

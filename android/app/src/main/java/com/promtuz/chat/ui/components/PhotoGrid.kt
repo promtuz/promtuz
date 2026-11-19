@@ -1,5 +1,9 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.security.PrivateChatSession
+import com.promtuz.chat.ui.camera.CameraTile
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -14,7 +18,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -28,13 +31,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -91,7 +92,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
         reload++
     }
     // The permission dialog pauses the activity, which would otherwise lock a private chat.
-    val requestAccess = { com.promtuz.chat.security.PrivateChatSession.beginHandoff(); launcher.launch(perms) }
+    val requestAccess = { PrivateChatSession.beginHandoff(); launcher.launch(perms) }
 
     if (!hasAccess) {
         Column(
@@ -116,7 +117,7 @@ fun PhotoGrid(onSend: (List<Uri>) -> Unit, onOpenSystemPicker: () -> Unit, onOpe
             contentPadding = PaddingValues(start = 2.dp, top = 2.dp, end = 2.dp, bottom = 88.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            item(key = "camera") { com.promtuz.chat.ui.camera.CameraTile(onOpenCamera) }
+            item(key = "camera") { CameraTile(onOpenCamera) }
             items(items, key = { it.uri }) { item ->
                 val order = selection.indexOf(item.uri)
                 PhotoCell(item, order) {

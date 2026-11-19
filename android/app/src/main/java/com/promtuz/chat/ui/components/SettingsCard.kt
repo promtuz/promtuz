@@ -1,9 +1,11 @@
 package com.promtuz.chat.ui.components
 
+import com.promtuz.chat.R
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.theme.Radii
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.toggleable
@@ -13,8 +15,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -168,8 +168,8 @@ fun SettingsRow(
         value?.let { Text(it, style = RowValueStyle, color = valueColor ?: c.muted, maxLines = 1) }
         when (trailing) {
             Trailing.Chevron -> MorphIcon(MorphGlyph.ChevronRight, null, Modifier.size(20.dp), tint = c.muted)
-            Trailing.Check -> DrawableIcon(com.promtuz.chat.R.drawable.oi_check, size = 20.dp, tint = c.accent)
-            Trailing.External -> DrawableIcon(com.promtuz.chat.R.drawable.oi_external_link, size = 20.dp, tint = c.muted)
+            Trailing.Check -> DrawableIcon(R.drawable.oi_check, size = 20.dp, tint = c.accent)
+            Trailing.External -> DrawableIcon(R.drawable.oi_external_link, size = 20.dp, tint = c.muted)
             null -> {}
         }
         trailingContent?.invoke(this)
@@ -243,6 +243,27 @@ fun Modifier.cardBlock(): Modifier = dividerInset(null)
 /** A custom row whose divider starts at [start], where its text starts. */
 fun Modifier.cardRow(start: Dp = Inset): Modifier = dividerInset(start)
 
+/** A tinted status tile with a title and one line beneath, as at the top of Backup and Updates. */
+@Composable
+fun StatusSummary(title: String, subtitle: String, tint: Color, modifier: Modifier = Modifier, icon: @Composable () -> Unit) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(48.dp).clip(RoundedCornerShape(Radii.badge)).background(tint.copy(alpha = 0.16f)), Alignment.Center) { icon() }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = StatusTitleStyle, color = Promtuz.colors.text)
+            Text(subtitle, style = RowSubtitleStyle, color = Promtuz.colors.muted)
+        }
+    }
+}
+
+private val StatusTitleStyle = TextStyle(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
+
+/** The accent title on the first row of a [lazyCardRow] card. */
+@Composable
+fun LazyCardHeader(text: String, count: Int, modifier: Modifier = Modifier) {
+    Text(text, modifier.fillMaxWidth().lazyCardRow(0, count).padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp),
+        style = SectionHeaderStyle, color = Promtuz.colors.accent)
+}
+
 /**
  * A row standing in for a card when the list is too long for one [SettingsCard]: row [index] of
  * [count] as a lazy item, rounding the card's ends and drawing the divider above itself.
@@ -310,7 +331,7 @@ private fun <T> ChoicePopup(
             Text(title, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp).semantics { heading() },
                 style = TextStyle(fontSize = 20.sp, lineHeight = 26.sp), color = c.text)
             Column(
-                Modifier.slabHost(slab, current, choices.size, c.glassFill, com.promtuz.chat.ui.theme.Radii.tile) { onPick(choices[it].value) },
+                Modifier.slabHost(slab, current, choices.size, c.glassFill, Radii.tile) { onPick(choices[it].value) },
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 choices.forEachIndexed { i, choice ->
