@@ -32,6 +32,11 @@ impl From<crate::hidden::Tag> for HiddenTag {
 #[uniffi::export]
 pub fn hide_conversation(conversation_id: Vec<u8>, code: Option<String>) -> Result<HiddenTag, CoreError> {
     let conv = fixed::<16>(&conversation_id, "conversation id")?;
+    let direct = crate::data::conversation::Conversation::get(&conv)
+        .is_some_and(|c| c.kind == crate::data::conversation::KIND_DIRECT);
+    if !direct {
+        return Err(anyhow::anyhow!("Only a chat with one person can be hidden").into());
+    }
     match code {
         Some(code) => {
             let code = Zeroizing::new(code);
@@ -88,15 +93,30 @@ pub fn cancel_private_unlocks() {
 }
 #[uniffi::export]
 pub fn lock_private_conversations() {
-    {
+    let closed = {
         let _operations = core().mls_operations.iter().map(|lock| lock.lock()).collect::<Vec<_>>();
         let mut sessions = core().private_sessions.write();
         core().private_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let open = !sessions.is_empty();
         sessions.clear();
+        open
+    };
+    if closed {
+        crate::privacy::sessions_changed();
     }
     crate::staging::lock_private();
     // After the operation locks: sealing takes the configuration lock, which ranks before them.
-    crate::hidden::seal_all();
+    // Off the caller's thread, since Android locks on every pause. An unlock meanwhile is safe:
+    // sealing skips open chats, and `open` skips chats a later lock closed.
+    static QUEUED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if cfg!(test) {
+        crate::hidden::seal_all();
+    } else if !QUEUED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        core().spawn_blocking(|| {
+            QUEUED.store(false, std::sync::atomic::Ordering::SeqCst);
+            crate::hidden::seal_all();
+        });
+    }
 }
 #[uniffi::export]
 pub fn remove_conversation_lock(conversation_id: Vec<u8>) -> Result<(), CoreError> {

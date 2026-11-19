@@ -24,7 +24,7 @@ fun RemoveLockDialog(app: AppVM, conversationHex: String, name: String, onDismis
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("Remove lock?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("This chat will open without a code, and its notifications come back on.")
+            Text("This chat will open without a code and can notify you again.")
             error?.let { Text(it, color = Promtuz.colors.danger) }
         } },
         confirmButton = { TextButton(enabled = !busy, onClick = {

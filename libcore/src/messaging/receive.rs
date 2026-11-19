@@ -623,7 +623,9 @@ pub(crate) fn receive_application_content(
                 Ok(Some((saved, content))) => {
                     if let Some(from) = forwarded {
                         let conn = core().db.messages().lock();
-                        crate::data::message::Message::set_forwarded_tx(&conn, &conv, &did, &from)?;
+                        if let Err(e) = crate::data::message::Message::set_forwarded_tx(&conn, &conv, &did, &from) {
+                            log::warn!("forwarded flag not saved: {e}");
+                        }
                     }
                     MessageEv::Received {
                         id: saved.inner.id,

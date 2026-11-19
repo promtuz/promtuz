@@ -170,8 +170,7 @@ impl Snapshot {
     }
 }
 
-/// Old snapshots contain raw OpenMLS values. Encrypt those values in place using the same
-/// provider format as live rows, preserving rollback/recovery behavior without a readable archive.
+/// Opens sealed snapshot values when the group's lock is removed; [privatize_snapshots] is the reverse.
 pub(crate) fn publicize_snapshots(conn:&Connection,gid:&[u8;32],key:&[u8])->Result<()> {
     let rows=crate::db::all(conn,"SELECT branch,snapshot FROM mls_branches WHERE group_id=?1 AND length(snapshot)>0",[gid],
         |r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?)))?;

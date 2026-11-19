@@ -167,7 +167,7 @@ fun HomeSearchScreen(app: AppVM) {
                 item("chats") { CardSectionLabel("Chats", Modifier.lazyCardRow(0, results.size + 1)) }
                 itemsIndexed(results, key = { _, it -> it.conversationHex }) { i, chat ->
                     HomeChatListItem(chat, presence = null, typing = false, pinned = chat.pinned,
-                        muted = chat.muted && !chat.locked, menuState = menu, privateChat = chat.conversationHex == privateResult?.conversationHex,
+                        muted = chat.muted, menuState = menu, privateChat = chat.conversationHex == privateResult?.conversationHex,
                         modifier = Modifier.lazyCardRow(i + 1, results.size + 1, dividerStart = 76.dp, divider = i > 0),
                         onOpen = {
                             if (chat.conversationHex != privateResult?.conversationHex) {

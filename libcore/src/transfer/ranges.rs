@@ -1,7 +1,6 @@
 //! The single owner of a receiver file and its verified chunk ranges. It verifies, writes and syncs
 //! each chunk, then commits the bitmap and the contiguous prefix in one transaction.
 
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
@@ -558,7 +557,7 @@ mod tests {
         receiver.commit(0, f.chunk(0), &f.lease).unwrap();
         assert_eq!((receiver.prefix(), f.bitmap()), (1, Some(vec![0b101])), "a retry commits once");
 
-        receiver.file = crate::private_files::StorageFile::plain(File::open(&f.path).unwrap()).unwrap();
+        receiver.file = crate::private_files::StorageFile::plain(std::fs::File::open(&f.path).unwrap()).unwrap();
         assert!(receiver.commit(1, f.chunk(1), &f.lease).unwrap_err().is::<std::io::Error>());
         assert!(!receiver.contains(1));
         assert_eq!(f.bitmap(), Some(vec![0b101]));

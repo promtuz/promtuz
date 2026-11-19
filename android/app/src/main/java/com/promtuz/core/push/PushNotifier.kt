@@ -171,7 +171,8 @@ object PushNotifier {
         val nm = app.getSystemService(NotificationManager::class.java)
         val hidden = CoreBridge.privateConversationIds().map { it.toHex() }
         hidden.forEach { nm.cancel(notifId(it)); rendered.remove(it) }
-        if (hidden.isNotEmpty()) ShortcutManagerCompat.removeDynamicShortcuts(app, hidden)
+        // Long-lived shortcuts outlive removeDynamicShortcuts in the system's conversation cache.
+        if (hidden.isNotEmpty()) ShortcutManagerCompat.removeLongLivedShortcuts(app, hidden)
 
         val enabled = ChatPrefs.notifEnabled
         if (!enabled) {
@@ -195,7 +196,7 @@ object PushNotifier {
         val chatsOn = ChatPrefs.notifChats
         val groupsOn = ChatPrefs.notifGroups
         mutedConvs = convs.filter { it.muted || !(if (it.kind.toInt() == 1) groupsOn else chatsOn) }
-            .map { it.id.toHex() }.toSet()
+            .map { it.id.toHex() }.toSet() + hidden
         rendered.keys.retainAll(counts.keys)
         for (conv in counts.keys) {
             if (!enabled || viewing(conv) || conv in mutedConvs) {
@@ -293,7 +294,7 @@ object PushNotifier {
         } else emptyMap()
         // A read, mute or privacy change may have happened while a sticker was fetched.
         if (viewing(convHex) || !ChatPrefs.notifEnabled || ChatPrefs.notifPreview != previewEnabled ||
-            CoreBridge.conversation(conv)?.muted == true ||
+            CoreBridge.conversation(conv)?.muted == true || CoreBridge.privateConversationIds().any { it.contentEquals(conv) } ||
             CoreBridge.unreadCounts().none { it.conversationId.contentEquals(conv) && it.count.toInt() == n }) return
         val current = CoreBridge.recentIncoming(conv, MAX_LINES).takeLast(n)
         if (current.map { Triple(it.id, it.content, it.mediaKind) } !=

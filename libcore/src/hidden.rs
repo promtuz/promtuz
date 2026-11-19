@@ -148,8 +148,8 @@ pub(crate) fn chat_with(peer: &[u8; 32]) -> Option<[u8; 16]> {
 
 /// The chat must already be locked. An open session stays open; the person is sealed on lock.
 pub(crate) fn hide(conv: &[u8; 16]) -> Result<Tag> {
+    let _configuration = core().private_configuration.lock();
     let peer = {
-        let _configuration = core().private_configuration.lock();
         let me = crate::data::identity::Identity::local_ipk();
         let conn = core().db.messages().lock();
         let direct = crate::data::conversation::Conversation::get_tx(&conn, conv)
@@ -170,14 +170,11 @@ pub(crate) fn hide(conv: &[u8; 16]) -> Result<Tag> {
         .map(|n| tag_of(&peer, conv, n))
         .find(|t| t.as_ref().map_or(true, |t| !taken.iter().any(|s| Tag::decode(s).is_some_and(|o| o.code == t.code))))
         .ok_or_else(|| anyhow!("no free tag"))??;
-    {
-        let _configuration = core().private_configuration.lock();
-        core().db.messages().lock().execute(
-            "UPDATE private_conversations SET hidden=1,marker=?2,tag=?3,vault=NULL WHERE conversation_id=?1",
-            params![conv, marker, tag.encode()],
-        )?;
-        seal_held(conv)?;
-    }
+    core().db.messages().lock().execute(
+        "UPDATE private_conversations SET hidden=1,marker=?2,tag=?3,vault=NULL WHERE conversation_id=?1",
+        params![conv, marker, tag.encode()],
+    )?;
+    seal_held(conv)?;
     Ok(tag)
 }
 
@@ -268,7 +265,7 @@ pub(crate) fn seal_held(conv: &[u8; 16]) -> Result<()> {
                 messages,
             }
         };
-        let sealed = crate::privacy::seal_with_public(conv, &public, &postcard::to_allocvec(&person)?)?;
+        let sealed = crate::privacy::seal_with_public(conv, &public, &zeroize::Zeroizing::new(postcard::to_allocvec(&person)?))?;
         core().db.messages().lock().execute(
             "UPDATE private_conversations SET vault=?2 WHERE conversation_id=?1 AND hidden=1",
             params![conv, sealed],
@@ -285,7 +282,7 @@ pub(crate) fn seal_held(conv: &[u8; 16]) -> Result<()> {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         for (row, sender, envelope) in buffered {
-            let wrapped = crate::privacy::seal_with_public(conv, &public, &postcard::to_allocvec(&(sender, envelope))?)?;
+            let wrapped = crate::privacy::seal_with_public(conv, &public, &zeroize::Zeroizing::new(postcard::to_allocvec(&(sender, envelope))?))?;
             tx.execute(
                 "UPDATE OR IGNORE mls_private_inbox SET sender=?2,envelope=?3,hidden=1 WHERE rowid=?1",
                 params![row, marker, wrapped],
@@ -294,6 +291,8 @@ pub(crate) fn seal_held(conv: &[u8; 16]) -> Result<()> {
         tx.commit()?;
     }
     core().db.contacts().lock().execute("DELETE FROM contacts WHERE ipk=?1", [peer])?;
+    // Pending deliveries still need the key; dead ones are never retried.
+    core().db.outbox().lock().execute("DELETE FROM outbox WHERE target_ipk=?1 AND state=1", [peer])?;
     {
         let conn = core().db.network().lock();
         for (t, f) in NETWORK_ROWS {
@@ -320,7 +319,7 @@ pub(crate) fn seal_held(conv: &[u8; 16]) -> Result<()> {
     tx.commit()?;
     let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     drop(conn);
-    for db in [core().db.contacts(), core().db.network()] {
+    for db in [core().db.contacts(), core().db.network(), core().db.outbox()] {
         let _ = db.lock().execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
     crate::data::peer_avatar::notify_changed();
@@ -331,6 +330,10 @@ pub(crate) fn seal_held(conv: &[u8; 16]) -> Result<()> {
 /// leaves it authoritative and the next `seal` finishes removing whatever was restored.
 pub(crate) fn open(conv: &[u8; 16]) -> Result<()> {
     let _configuration = core().private_configuration.lock();
+    // A lock since the session began has already sealed the person again.
+    if !core().private_sessions.read().contains_key(conv) {
+        return Ok(());
+    }
     let vault: Option<Vec<u8>> = core()
         .db
         .messages()
@@ -339,7 +342,7 @@ pub(crate) fn open(conv: &[u8; 16]) -> Result<()> {
         .optional()?
         .flatten();
     let Some(vault) = vault else { return Ok(()) };
-    let person: Person = postcard::from_bytes(&crate::privacy::open_bytes(conv, &vault)?)?;
+    let person: Person = postcard::from_bytes(&zeroize::Zeroizing::new(crate::privacy::open_bytes(conv, &vault)?))?;
     let marker = marker_of(&person.ipk)?;
     for table in &person.contacts {
         insert(&core().db.contacts().lock(), table)?;
@@ -383,7 +386,8 @@ pub(crate) fn seal_all() {
     }
 }
 
-/// Seals open hidden chats for the duration of `f`, then restores them for their sessions.
+/// Seals every hidden chat for the duration of `f`, then reopens the ones that were open. A lock
+/// during `f` closes them for good.
 pub(crate) fn sealed_during<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     let unsealed: Vec<[u8; 16]> = crate::db::all(
         &core().db.messages().lock(),
@@ -391,21 +395,35 @@ pub(crate) fn sealed_during<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
         [],
         |r| r.get(0),
     )?;
-    let saved: Vec<_> = unsealed
-        .iter()
-        .filter_map(|c| core().private_sessions.write().remove(c).map(|key| (*c, key)))
-        .collect();
+    let (generation, saved) = {
+        let mut sessions = core().private_sessions.write();
+        let saved: Vec<_> = unsealed.iter().filter_map(|c| sessions.remove(c).map(|key| (*c, key))).collect();
+        (core().private_generation.load(std::sync::atomic::Ordering::SeqCst), saved)
+    };
     let result = (|| {
-        for (conv, _) in &saved {
+        for conv in &unsealed {
             seal(conv)?;
         }
         f()
     })();
-    for (conv, key) in saved {
-        core().private_sessions.write().insert(conv, key);
+    let reopened: Vec<[u8; 16]> = {
+        let mut sessions = core().private_sessions.write();
+        if generation != core().private_generation.load(std::sync::atomic::Ordering::SeqCst) {
+            Vec::new()
+        } else {
+            saved.into_iter().map(|(conv, key)| { sessions.insert(conv, key); conv }).collect()
+        }
+    };
+    for conv in reopened {
         if let Err(error) = open(&conv) {
             log::warn!("HIDDEN: could not restore an open chat: {error:#}");
         }
+        // Messages that arrived while it was sealed waited in the private inbox.
+        core().spawn(async move {
+            if let Err(error) = crate::mls::privacy::drain(conv).await {
+                log::warn!("PRIVATE: buffered inbox remains pending: {error:#}");
+            }
+        });
     }
     result
 }
@@ -439,6 +457,7 @@ mod tests {
         found.extend(mentions(&db.contacts().lock(), peer));
         found.extend(mentions(&db.network().lock(), peer));
         found.extend(mentions(&db.mls().lock(), peer));
+        found.extend(mentions(&db.outbox().lock(), peer));
         found
     }
 
@@ -457,6 +476,8 @@ mod tests {
         scope.core.db.network().lock().execute("INSERT INTO presence_interest(peer) VALUES(?1)", [peer]).unwrap();
         Message::save_incoming(conv, peer, &[1; 16], "hello", 1, None).unwrap();
         Seen::record(&peer, &[1; 16], 1);
+        scope.core.db.outbox().lock().execute(
+            "INSERT INTO outbox(id,op_type,target_ipk,payload,created_at,state) VALUES(X'01',0,?1,X'',0,1)", [peer]).unwrap();
         (peer, conv)
     }
 
@@ -531,5 +552,20 @@ mod tests {
         assert_eq!(everywhere(&scope, &peer), Vec::<String>::new());
         crate::privacy::unlock("crash-code").unwrap();
         assert!(Contact::exists(&peer));
+    }
+
+    #[tokio::test]
+    async fn a_lock_during_a_backup_keeps_the_hidden_chat_sealed() {
+        let scope = crate::test_support::ScopedCore::new();
+        let (peer, conv) = chat(&scope);
+        hide_conversation(conv.to_vec(), Some("backup-code".into())).unwrap();
+        assert!(Contact::exists(&peer));
+        super::sealed_during(|| Ok(lock_private_conversations())).unwrap();
+        assert!(!scope.core.private_sessions.read().contains_key(&conv));
+        assert_eq!(everywhere(&scope, &peer), Vec::<String>::new());
+
+        crate::privacy::unlock("backup-code").unwrap();
+        super::sealed_during(|| Ok(())).unwrap();
+        assert!(Contact::exists(&peer), "without a lock the open chat comes back");
     }
 }

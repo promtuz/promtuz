@@ -29,6 +29,7 @@ private fun bend(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Floa
 private fun line(x1: Float, y1: Float, x2: Float, y2: Float) =
     bend(x1, y1, (x1 + x2) / 2, (y1 + y2) / 2, x2, y2, 0f)
 private val hiddenStroke = line(12f, 12f, 12f, 12f)
+private fun bar(x: Float) = listOf(x, 3.25f, x + 3.5f, 3.25f, x + 3.5f, 20.75f, x, 20.75f, x, 3.25f, 1f, 1f, 1f)
 
 /**
  * Rounded centerlines on a 24-unit canvas, sourced from design/icons/outlined/morph. Two contours
@@ -45,7 +46,8 @@ enum class MorphGlyph(internal val strokes: List<Float>, internal val angle: Flo
     Check(bend(2.375f, 12f, 8.79167f, 18.41667f, 21.625f, 5.58333f) + hiddenStroke),
     Code(bend(8.875f, 5.5f, 2.375f, 12f, 8.875f, 18.5f) + bend(15.125f, 5.5f, 21.625f, 12f, 15.125f, 18.5f)),
     Play(listOf(4.5f, 12f, 4.5f, 2.375f, 21.625f, 12f, 4.5f, 21.625f, 4.5f, 12f, 2f, 1.2f, 2f) + hiddenStroke),
-    Pause(line(6.5f, 2.375f, 6.5f, 21.625f) + line(17.5f, 2.375f, 17.5f, 21.625f)),
+    // Closed bars, so a solid icon fills them.
+    Pause(bar(5.25f) + bar(15.25f)),
 }
 
 /** Hoist this above conditional layouts when the control moves between modes. */
@@ -72,13 +74,16 @@ fun rememberMorphIconState(glyph: MorphGlyph): MorphIconState {
 
 @Composable
 fun MorphIcon(glyph: MorphGlyph, description: String?, modifier: Modifier = Modifier,
-    tint: Color = LocalContentColor.current, strokeWidth: Dp = 1.75.dp) =
-    MorphIcon(rememberMorphIconState(glyph), description, modifier, tint, strokeWidth)
+    tint: Color = LocalContentColor.current, strokeWidth: Dp = 1.75.dp, solid: Boolean = false) =
+    MorphIcon(rememberMorphIconState(glyph), description, modifier, tint, strokeWidth, solid)
 
-/** [strokeWidth] stays fixed as the layout size changes; a canvas too small for it draws nothing. */
+/**
+ * [strokeWidth] stays fixed as the layout size changes; a canvas too small for it draws nothing.
+ * [solid] fills closed contours as well.
+ */
 @Composable
 fun MorphIcon(state: MorphIconState, description: String?, modifier: Modifier = Modifier,
-    tint: Color = LocalContentColor.current, strokeWidth: Dp = 1.75.dp) {
+    tint: Color = LocalContentColor.current, strokeWidth: Dp = 1.75.dp, solid: Boolean = false) {
     require(strokeWidth.value.isFinite() && strokeWidth >= 0.dp) {
         "strokeWidth must be finite and non-negative"
     }
@@ -139,8 +144,9 @@ fun MorphIcon(state: MorphIconState, description: String?, modifier: Modifier = 
                 }
                 val end = pixel(points.last())
                 path.lineTo(end.x, end.y)
-                drawPath(path, tint.copy(alpha = tint.alpha * alpha),
-                    style = Stroke(strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                val color = tint.copy(alpha = tint.alpha * alpha)
+                if (solid) drawPath(path, color)
+                drawPath(path, color, style = Stroke(strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round))
             }
         }
     }

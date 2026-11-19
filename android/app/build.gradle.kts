@@ -104,6 +104,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "RESOLVER_SEEDS", "\"$resolverSeedsLiteral\"")
+        // Published debug builds reach users, so only an explicit local build may be captured.
+        buildConfigField("boolean", "CAPTURABLE", providers.gradleProperty("promtuzCapturable").orNull.toBoolean().toString())
     }
     splits {
         abi {

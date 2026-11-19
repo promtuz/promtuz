@@ -785,7 +785,6 @@ pub fn set_conversation_title(conversation_id: Vec<u8>, title: String) -> Result
 pub fn get_conversations() -> Vec<MessageRecord> {
     Message::get_conversations()
         .into_iter()
-        .filter(|m| !crate::hidden::is_concealed(&m.conversation_id))
         .map(with_media_kind)
         .collect()
 }

@@ -660,6 +660,8 @@ const MIGRATION_ARRAY: &[M] = &[
         DROP TABLE hidden_rollback_guard;
         ALTER TABLE private_conversations DROP COLUMN locked_at; ALTER TABLE private_conversations DROP COLUMN tag; ALTER TABLE private_conversations DROP COLUMN marker;
         ALTER TABLE private_conversations DROP COLUMN vault; ALTER TABLE private_conversations DROP COLUMN hidden;"),
+    // Locking used to force mute and removing the lock cleared it, so a locked chat's flag means nothing.
+    M::up("UPDATE conversations SET muted=0 WHERE id IN (SELECT conversation_id FROM private_conversations);").down(""),
 ];
 /// A migration's index is its schema version, so the array is append-only: an insert shifts every
 /// later version, and a device already past it runs the wrong statements.
@@ -701,8 +703,8 @@ mod tests {
 
     #[test]
     fn preparation_migration_keeps_history_and_refuses_to_drop_active_state() {
-        // Just before the preparation migration; six have been appended since.
-        let previous = MIGRATION_ARRAY.len() - 7;
+        // Just before the message_media_preparations migration.
+        let previous = 36;
         let mut conn = migrate_from(previous, |conn| {
             conn.execute("INSERT INTO messages (id, conversation_id, sender_ipk, content, outgoing,
                 timestamp, dispatch_id) VALUES (?1, ?2, ?3, 'existing', 0, 100, ?4)",

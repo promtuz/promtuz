@@ -167,7 +167,7 @@ pub(crate) fn lock(conv: &[u8; 16], code: &str) -> Result<()> {
         )?;
     }
     tx.execute("DELETE FROM reactions WHERE conversation_id=?1", [conv])?;
-    tx.execute("UPDATE conversations SET muted=1,pinned=0 WHERE id=?1", [conv])?;
+    tx.execute("UPDATE conversations SET pinned=0 WHERE id=?1", [conv])?;
     tx.commit()?;
     crate::private_files::cleanup_plaintext_tx(&conn)?;
     // secure_delete clears freed cells; checkpoint + VACUUM rewrites old live database pages.
@@ -194,6 +194,15 @@ pub(crate) fn remove_lock(conv: &[u8; 16]) -> Result<()> {
     let _operation = group.as_ref().map(|gid| crate::mls::recovery::operation_lock(gid).lock());
     ensure!(is_private(conv), "Chat is not locked");
     ensure!(core().private_sessions.read().contains_key(conv), "Chat is locked");
+    // The vault goes with the row, so a person who stayed sealed would be lost for good.
+    ensure!(
+        !core().db.messages().lock().query_row(
+            "SELECT hidden=1 AND vault IS NOT NULL FROM private_conversations WHERE conversation_id=?1",
+            [conv],
+            |r| r.get::<_, bool>(0),
+        )?,
+        "Chat is locked"
+    );
     ensure!(
         !core().db.messages().lock().query_row(
             "SELECT EXISTS(SELECT 1 FROM private_files WHERE conversation_id=?1 AND complete=0)",
@@ -249,7 +258,6 @@ pub(crate) fn remove_lock(conv: &[u8; 16]) -> Result<()> {
     }
     tx.execute("DELETE FROM private_reactions WHERE conversation_id=?1", [conv])?;
     crate::private_files::clear_conversation_tx(&tx, conv)?;
-    tx.execute("UPDATE conversations SET muted=0 WHERE id=?1", [conv])?;
     tx.commit()?;
     drop(conn);
     for path in encrypted {
@@ -280,6 +288,7 @@ pub(crate) fn unlock_at(code: &str, generation: u64) -> Result<Option<[u8; 16]>>
         );
         sessions.insert(conv, Zeroizing::new(private.to_vec()));
     }
+    sessions_changed();
     if let Err(error) = rewrap(&conv, &private, &salt, code, &mut keys) {
         log::warn!("PRIVATE: key stays under its own salt: {error:#}");
     }
@@ -287,6 +296,12 @@ pub(crate) fn unlock_at(code: &str, generation: u64) -> Result<Option<[u8; 16]>>
         log::warn!("HIDDEN: the person stays sealed until the next unlock: {error:#}");
     }
     Ok(Some(conv))
+}
+/// Lists showing what an open chat reveals reload when one opens or closes.
+pub(crate) fn sessions_changed() {
+    if let Some(events) = core().events.get() {
+        events.on_db_changed(vec!["private_sessions".into()]);
+    }
 }
 fn valid(code: &str) -> bool {
     code.chars().count() >= 6 && code.len() <= 256

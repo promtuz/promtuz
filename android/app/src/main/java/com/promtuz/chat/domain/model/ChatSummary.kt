@@ -37,8 +37,9 @@ data class ChatSummary(
     val rawTitle: String = "",
     /** A message request we have not accepted. */
     val request: Boolean = false,
-    /** Opens only with its code; carries no preview. */
+    /** Opens only with its code; carries no preview until [unlocked]. */
     val locked: Boolean = false,
+    val unlocked: Boolean = false,
     val hidden: Boolean = false,
 ) {
     val isGroup: Boolean get() = kind == 1

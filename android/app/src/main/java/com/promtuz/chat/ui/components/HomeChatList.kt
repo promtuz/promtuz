@@ -103,7 +103,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
                 typing = Activity.Typing in
                     Activity.fromBits(activity[chat.conversationHex] ?: 0),
                 pinned = chat.pinned,
-                muted = chat.muted && !chat.locked,
+                muted = chat.muted,
                 menuState = menuState,
                 onOpen = { appViewModel.openChat(chat.conversationHex, chat.name) },
                 onPin = { ChatPrefs.togglePin(chat.conversationHex, !chat.pinned) },

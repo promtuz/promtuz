@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     io::{BufReader, Cursor, Read},
     path::Path,
     sync::OnceLock,
@@ -988,7 +987,7 @@ mod tests {
         assert!(ANIMATED_EXIF_XMP_AVIF.windows(4).any(|bytes| bytes == b"Exif"));
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("picked.avif");
-        File::create(&path).unwrap().write_all(ANIMATED_EXIF_XMP_AVIF).unwrap();
+        std::fs::File::create(&path).unwrap().write_all(ANIMATED_EXIF_XMP_AVIF).unwrap();
         let prepared = prepare_image_path(&path, MediaRequest::ChatImage { hd_enabled: false }).unwrap();
         assert!(prepared.animated);
         assert_eq!(inspect(&prepared.bytes).unwrap(), ImageKind::Avif);
@@ -1048,7 +1047,7 @@ mod tests {
         ::image::codecs::png::PngEncoder::new(&mut png)
             .write_image(&[1, 2, 3, 4], 1, 1, ColorType::Rgba8.into())
             .unwrap();
-        File::create(&path).unwrap().write_all(&png).unwrap();
+        std::fs::File::create(&path).unwrap().write_all(&png).unwrap();
         assert_eq!(inspect_path(&path).unwrap(), ImageKind::Png);
         assert_eq!(decode_sdr_still_path(&path).unwrap().rgba, vec![1, 2, 3, 4]);
         let prepared =
@@ -1060,7 +1059,7 @@ mod tests {
     fn private_avif_import_is_reencoded_from_libavif_file_io() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("picked.avif");
-        File::create(&path)
+        std::fs::File::create(&path)
             .unwrap()
             .write_all(&super::super::encode_avif(&[1, 2, 3, 4], 1, 1, 60.0).unwrap())
             .unwrap();

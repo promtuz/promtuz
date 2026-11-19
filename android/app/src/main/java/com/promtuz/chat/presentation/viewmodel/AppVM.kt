@@ -73,7 +73,7 @@ class AppVM(
 
     /** Requests included. Core orders it, pinned first, so the list keeps no ordering rule of its own. */
     val chats: StateFlow<List<ChatSummary>> =
-        observeQuery(setOf("contacts", "messages", "conversations", "conversation_members")) {
+        observeQuery(setOf("contacts", "messages", "conversations", "conversation_members", "private_sessions")) {
             loadSummaries()
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -187,9 +187,9 @@ class AppVM(
             lastOutgoing = last?.outgoing == true, lastDeleted = last?.deleted == true,
             lastStatus = last?.status?.toInt() ?: 1,
             unreadCount = unread,
-            muted = true, rawTitle = c.title, amMember = c.amMember, canLeave = c.canLeave,
+            muted = c.muted, rawTitle = c.title, amMember = c.amMember, canLeave = c.canLeave,
             ownerIsStuck = c.ownerIsStuck, commits = c.commits, request = c.request,
-            locked = true, hidden = c.hidden,
+            locked = true, unlocked = true, hidden = c.hidden,
         )
         // A background transition can revoke access while the IO reads are in flight.
         if (com.promtuz.chat.security.PrivateChatSession.generation != generation ||
@@ -318,7 +318,9 @@ class AppVM(
 
         bridge.listConversations().mapNotNull { c ->
             val key = c.id.toList()
-            val last = lastByConv[key]
+            // Core lists no message of a locked chat, so an open one is read like the chat screen reads it.
+            val unlocked = c.locked && bridge.isPrivateConversationUnlocked(c.id)
+            val last = if (unlocked) runCatching { bridge.messages(c.id, 1).lastOrNull() }.getOrNull() else lastByConv[key]
             val contact = c.peer?.let { contactByIpk[it.toList()] }
             // Opened to message someone, then left without writing anything.
             if (c.kind.toInt() == 0 && contact == null && !c.request && last == null) return@mapNotNull null
@@ -332,11 +334,12 @@ class AppVM(
                 lastPreview = last?.let { preview(c.id, it) },
                 lastMessageId = last?.id,
                 lastDispatchId = last?.dispatchId?.toHex(),
-                lastMediaKind = last?.mediaKind?.toInt() ?: 0,
+                lastMediaKind = if (unlocked) last?.let { bridge.getMessageMedia(c.id, it.dispatchId)?.kind?.toInt() } ?: 0
+                    else last?.mediaKind?.toInt() ?: 0,
                 timestampMs = (last?.timestamp ?: c.createdAt).toLong() * 1000,
                 status = contact?.status?.toInt() ?: 1,
                 rejectReason = contact?.rejectReason?.toInt(),
-                unreadCount = unread[key] ?: 0,
+                unreadCount = if (unlocked) bridge.privateConversationUnreadCount(c.id) else unread[key] ?: 0,
                 // A membership line already names who did it.
                 lastOutgoing = last?.outgoing == true && last.system.toInt() !in setOf(1, 2, 3, 4, 6, 7),
                 lastDeleted = last?.deleted == true,
@@ -350,6 +353,7 @@ class AppVM(
                 rawTitle = c.title,
                 request = c.request,
                 locked = c.locked,
+                unlocked = unlocked,
                 hidden = c.hidden,
             )
         }

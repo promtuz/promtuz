@@ -35,8 +35,11 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
         observeQuery(setOf("contacts", "peer_profiles", "prefs")) { CoreBridge.personProfile(peer.fromHex()) }
     }.collectAsState(null)
     val chats by app.chats.collectAsState()
+    val privateSummary by app.privateSummary.collectAsState()
     val privateIds by app.privateIds.collectAsState()
-    val chat = chats.firstOrNull { !it.isGroup && (it.conversationHex == conversation || it.peerHex == peer) }
+    // A hidden chat opened from search may not be in the list yet.
+    val chat = (chats + listOfNotNull(privateSummary))
+        .firstOrNull { !it.isGroup && (it.conversationHex == conversation || it.peerHex == peer) }
     val locked = chat != null && chat.conversationHex in privateIds
     val hidden = chat?.hidden == true
     val tag by produceState<uniffi.core.HiddenTag?>(null, chat?.conversationHex, hidden) {

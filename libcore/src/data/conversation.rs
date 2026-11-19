@@ -46,6 +46,11 @@ impl Conversation {
     }
 
     pub fn for_peer(peer: &[u8; 32]) -> Result<[u8; 16]> {
+        // A sealed hidden chat has no roster, so a new one would sit beside it naming the person.
+        anyhow::ensure!(
+            !crate::hidden::chat_with(peer).is_some_and(|conv| crate::hidden::is_concealed(&conv)),
+            "Chat not found"
+        );
         // Never take the identity lock while holding the messages lock.
         let me = Identity::local_ipk();
         let conn = core().db.messages().lock();

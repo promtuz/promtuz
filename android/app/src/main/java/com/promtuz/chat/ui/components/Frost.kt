@@ -32,6 +32,7 @@ import com.promtuz.chat.ui.theme.Radii
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.HazeProgressive
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.animation.core.EaseIn
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.HazeColorEffect
@@ -162,9 +163,11 @@ fun FrostFade(haze: HazeState, modifier: Modifier = Modifier) {
             noiseFactor(0f)
             backgroundColor(bar)
             blurRadius(32.dp)
-            progressive(HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = 0f))
+            // Held strong through the subtitle line, then thinned to nothing at the bar's foot.
+            progressive(HazeProgressive.verticalGradient(easing = EaseIn, startIntensity = 1f, endIntensity = 0f))
             // No saturation boost: at rest over a plain page the bar must match it exactly.
-            val tint = HazeColorEffect.tint(Brush.verticalGradient(0f to bar.copy(alpha = 0.7f), 1f to bar.copy(alpha = 0f)))
+            val tint = HazeColorEffect.tint(Brush.verticalGradient(
+                0f to bar.copy(alpha = 0.78f), 0.7f to bar.copy(alpha = 0.62f), 1f to bar.copy(alpha = 0f)))
             colorEffects(listOf(tint))
             fallbackColorEffect(tint)
         }

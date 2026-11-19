@@ -144,7 +144,7 @@ fun LockedChatGate(app: AppVM, conversation: String, name: String, onOpened: (Lo
             if (pin) {
                 CodeDots(code, checking, Modifier.shake(shakes))
                 Spacer(Modifier.weight(1f))
-                Box(Modifier.height(288.dp).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(Modifier.height(codeKeypadHeight()).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     androidx.compose.animation.AnimatedVisibility(!throttled,
                         enter = fadeIn(tween(320, easing = EaseOutQuint)) + scaleIn(tween(320, easing = EaseOutQuint), 0.8f),
                         exit = fadeOut(tween(320, easing = EaseOutQuint)) + scaleOut(tween(320, easing = EaseOutQuint), 0.8f)) {

@@ -101,7 +101,7 @@ fun HomeChatListItem(
     )) else listOf(
         buildList {
             if (!privateChat && !chat.locked) add(MenuAction(if (pinned) "Unpin" else "Pin", if (pinned) R.drawable.oi_unpin else R.drawable.oi_pin) { onPin() })
-            if (!privateChat && !chat.locked) add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
+            if (!privateChat) add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_volume else R.drawable.oi_volume_off) { onMute() })
             if (unread) add(MenuAction("Mark read", R.drawable.oi_message_check) { onMarkRead() })
         },
         buildList {
@@ -185,7 +185,7 @@ fun HomeChatListItem(
                     if (chat.hidden) DrawableIcon(
                         R.drawable.oi_hidden_chat, size = 15.dp, desc = "Hidden chat",
                         tint = c.muted,
-                    ) else if (privateChat) DrawableIcon(
+                    ) else if (privateChat || chat.unlocked) DrawableIcon(
                         R.drawable.oi_lock_chat_open, size = 15.dp, desc = "Unlocked chat",
                         tint = c.muted,
                     ) else if (chat.locked) DrawableIcon(
@@ -275,7 +275,7 @@ internal val HomePreviewStyle = TextStyle(fontSize = 14.5.sp, lineHeight = 20.sp
 
 private fun statusLine(chat: ChatSummary, typing: Boolean, c: PromtuzColors): Pair<String, Color> = when {
     typing -> "typing…" to c.accent
-    chat.locked -> "Locked chat" to c.muted
+    chat.locked && !chat.unlocked -> "Locked chat" to c.muted
     chat.status == 0 && chat.lastMessageId == null -> "Waiting to connect…" to c.accent
     chat.status == 2 -> declineText(chat.rejectReason) to c.danger
     chat.lastDeleted -> "deleted message" to c.muted

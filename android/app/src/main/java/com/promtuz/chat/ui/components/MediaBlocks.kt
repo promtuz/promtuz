@@ -355,6 +355,7 @@ fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, bubbleColor: Color
                 if (playing) "Pause voice message" else "Play voice message",
                 Modifier.size(20.dp),
                 tint = bubbleColor,
+                solid = true,
             )
         }
         Column(Modifier.width(VoiceWaveWidth), verticalArrangement = Arrangement.spacedBy(4.dp)) {
