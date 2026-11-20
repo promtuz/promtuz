@@ -200,7 +200,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                             if (muted) R.drawable.i_speaker else R.drawable.i_volume_off) {
                             if (!busy) actions.setMuted(!muted)
                         },
-                        MenuAction("Search", R.drawable.oi_search) {
+                        MenuAction("Search", R.drawable.i_search) {
                             pendingChatSearch.value = conversation; app.openChat(conversation, displayName)
                         },
                     ))
@@ -313,9 +313,7 @@ internal fun GroupInfoContent(state: GroupInfoState, actions: GroupInfoActions, 
                     else { dismissRequested = true }
                 }
                 BackHandler(searching) { closePickerMode() }
-                SearchableHeader(topBarColors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent,
-                    scrolledContainerColor = Color.Transparent), title = "Add members", selectionCount = selected.size.takeIf { it > 0 },
+                SearchableHeader(topBarColors = com.promtuz.chat.ui.theme.transparentTopAppBar(), title = "Add members", selectionCount = selected.size.takeIf { it > 0 },
                     searching = searching, query = query, onQuery = { query = it }, close = true,
                     onBack = ::closePickerMode, onSearch = { searching = true }, enabled = !busy)
                 Text("New members won’t see earlier messages.", Modifier.padding(horizontal = 20.dp, vertical = 8.dp),

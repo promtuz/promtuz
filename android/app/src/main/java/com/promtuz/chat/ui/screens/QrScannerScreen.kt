@@ -144,7 +144,7 @@ private fun BoxScope.PermissionDenied() {
             color = MaterialTheme.colorScheme.onBackground,
             textAlign = TextAlign.Center
         )
-        AppButton("Open Settings", {
+        AppButton("Open settings", {
             context.startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = Uri.fromParts("package", context.packageName, null)

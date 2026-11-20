@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
@@ -38,3 +39,12 @@ fun TopBarMorphIcon(
     tint = tint,
     strokeWidth = strokeWidth,
 )
+
+/** An outlined drawable at the morph glyphs' size and stroke, so the bar's icons read alike. */
+@Composable
+fun TopBarIcon(
+    @DrawableRes id: Int,
+    description: String?,
+    tint: Color = LocalContentColor.current,
+) = DrawableIcon(id, desc = description.orEmpty(), tint = tint, size = TopBarIconDefaults.Size,
+    strokeWidth = TopBarIconDefaults.StrokeWidth.value * IconGrid.value / TopBarIconDefaults.Size.value)

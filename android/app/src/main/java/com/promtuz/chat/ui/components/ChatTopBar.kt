@@ -202,13 +202,13 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                     add(
                         buildList {
                             add(
-                                MenuAction("Clear History", R.drawable.oi_broom) {
+                                MenuAction("Clear history", R.drawable.oi_broom) {
                                     confirmClear = true
                                 },
                             )
                             // The dialog needs the summary, so Delete waits for it.
                             if (summary != null) add(
-                                MenuAction("Delete Chat", R.drawable.oi_trash, destructive = true) {
+                                MenuAction("Delete chat", R.drawable.oi_trash, destructive = true) {
                                     confirmDelete = true
                                 },
                             )
@@ -218,7 +218,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             )
             }
         },
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+        colors = com.promtuz.chat.ui.theme.transparentTopAppBar(),
     )
     }
 

@@ -12,6 +12,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -45,6 +48,7 @@ fun SearchableHeader(
     windowInsets: WindowInsets = WindowInsets(0),
     topBarColors: TopAppBarColors = appTopBarColors(),
     showActionsWhileSearching: Boolean = false,
+    fade: Boolean = false,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     val titleStyle = screenTitleStyle()
@@ -114,17 +118,55 @@ fun SearchableHeader(
         windowInsets = windowInsets,
         colors = topBarColors,
         connectionStatus = false,
+        fade = fade,
         actions = {
             AnimatedVisibility(!searching, enter = fadeIn(ChatMotion.spec()) + expandHorizontally(ChatMotion.spec()),
                 exit = fadeOut(ChatMotion.spec()) + shrinkHorizontally(ChatMotion.spec())) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (onSearch != null) IconButton(onClick = onSearch, enabled = enabled && !searching) {
-                        Icon(painterResource(R.drawable.oi_search), searchLabel, Modifier.size(22.dp))
+                        TopBarIcon(R.drawable.oi_search, searchLabel)
                     }
                     if (!showActionsWhileSearching) actions()
                 }
             }
             if (showActionsWhileSearching) actions()
         },
+    )
+}
+
+@Stable
+class ScreenSearch(active: Boolean = false, query: String = "") {
+    var active by mutableStateOf(active)
+    var query by mutableStateOf(query)
+    fun close() { active = false; query = "" }
+
+    companion object {
+        val Saver = listSaver<ScreenSearch, Any>({ listOf(it.active, it.query) }, { ScreenSearch(it[0] as Boolean, it[1] as String) })
+    }
+}
+
+@Composable
+fun rememberScreenSearch() = rememberSaveable(saver = ScreenSearch.Saver) { ScreenSearch() }
+
+/** A screen's bar with a search action; Back closes the search before it leaves the screen. */
+@Composable
+fun SearchTopBar(
+    title: String,
+    search: ScreenSearch,
+    searchLabel: String,
+    scrollBehavior: TopAppBarScrollBehavior,
+    enabled: Boolean = true,
+    fade: Boolean = false,
+    showActionsWhileSearching: Boolean = false,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+    SearchableHeader(
+        title = title, searching = search.active, query = search.query, onQuery = { search.query = it },
+        close = false, enabled = enabled, searchLabel = searchLabel,
+        onBack = { if (search.active) search.close() else back?.onBackPressed() },
+        onSearch = { search.active = true },
+        scrollBehavior = scrollBehavior, windowInsets = TopAppBarDefaults.windowInsets,
+        fade = fade, showActionsWhileSearching = showActionsWhileSearching, actions = actions,
     )
 }

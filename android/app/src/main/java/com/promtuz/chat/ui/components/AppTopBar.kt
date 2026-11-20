@@ -39,6 +39,8 @@ fun pageFieldFill(): Color {
 fun appTopBarColors(): TopAppBarColors = TopAppBarDefaults.topAppBarColors(
     containerColor = Promtuz.colors.page,
     scrolledContainerColor = (if (Promtuz.colors.isDark) Promtuz.colors.card else Promtuz.colors.groupedPage),
+    navigationIconContentColor = Promtuz.colors.text,
+    actionIconContentColor = Promtuz.colors.text,
 )
 
 @Composable
@@ -51,26 +53,32 @@ fun AppTopBar(
     windowInsets: WindowInsets = TopAppBarDefaults.windowInsets,
     colors: TopAppBarColors = appTopBarColors(),
     connectionStatus: Boolean = true,
+    fade: Boolean = false,
 ) {
     val glass = LocalScreenGlass.current
-    val glassModifier = if (glass == null) Modifier else Modifier
-        .freezeOnExit()
-        .frost(glass.haze, FrostRole.Bar, page = glass.page, scrolled = { scrollBehavior?.state?.overlappedFraction ?: 0f })
+    val glassModifier = when {
+        glass == null -> Modifier
+        fade -> Modifier.freezeOnExit()
+        else -> Modifier.freezeOnExit()
+            .frost(glass.haze, FrostRole.Bar, page = glass.page, scrolled = { scrollBehavior?.state?.overlappedFraction ?: 0f })
+    }
+    Box(modifier.then(glassModifier)) {
+    if (glass != null && fade) FrostFade(glass.haze, Modifier.matchParentSize(), glass.page)
     TopAppBar(
         title = {
             Box(Modifier.centerBarTitle(screenTitleStyle())) {
                 if (connectionStatus) ConnectionAwareTitle(title) else ProvideTextStyle(screenTitleStyle(), title)
             }
         },
-        modifier = modifier.then(glassModifier),
         navigationIcon = navigationIcon,
         actions = actions,
         expandedHeight = 60.dp,
         scrollBehavior = scrollBehavior,
         windowInsets = windowInsets,
         colors = if (glass == null) colors
-            else TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = Color.Transparent),
+            else colors.copy(containerColor = Color.Transparent, scrolledContainerColor = Color.Transparent),
     )
+    }
 }
 
 /**

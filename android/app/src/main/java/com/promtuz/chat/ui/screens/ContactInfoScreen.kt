@@ -121,7 +121,7 @@ fun ContactInfoScreen(conversation: String?, peer: String, fallbackName: String 
                         scope.launch { runCatching { CoreBridge.setConversationMuted(chat.conversationHex.fromHex(), !chat.muted) }
                             .onFailure { error = "Couldn't change notifications" } }
                     })
-                    if (chat != null) add(MenuAction("Search", R.drawable.oi_search) {
+                    if (chat != null) add(MenuAction("Search", R.drawable.i_search) {
                         com.promtuz.chat.presentation.viewmodel.pendingChatSearch.value = chat.conversationHex
                         app.openChat(chat.conversationHex, name)
                     })

@@ -24,6 +24,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.util.lerp
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.theme.Promtuz
@@ -81,10 +82,9 @@ private fun rememberFrostStyle(role: FrostRole, scrolled: State<() -> Float>, pa
         HazeBlurStyle {
             noiseFactor(0f)
             when (role) {
-                // At rest the bar is identical to the page; it turns to card glass as content slides under.
-                FrostRole.Bar -> {
-                    val tint = lerp(page, c.card, scrolled.value().coerceIn(0f, 1f))
-                    frost(page, tint.copy(alpha = if (c.isDark) 0.76f else 0.74f), 36f)
+                // At rest the bar is identical to the page; it turns to the floating glass as content slides under.
+                FrostRole.Bar -> scrolled.value().coerceIn(0f, 1f).let { s ->
+                    frost(page, lerp(page, chatBar, s).copy(alpha = lerp(1f, 0.76f, s)), 38f)
                 }
                 // Sheets, dialogs and menus share the composer's glass so every floating layer reads alike.
                 FrostRole.ChatBar, FrostRole.Sheet, FrostRole.Floating -> frost(chatBar, chatBar.copy(alpha = 0.76f), 38f)
@@ -128,7 +128,7 @@ fun Modifier.frost(
         drawContent()
         val a = scrolled().coerceIn(0f, 1f)
         if (a > 0f) drawLine(edge.copy(alpha = edge.alpha * a), Offset(0f, size.height - 0.5f),
-            Offset(size.width, size.height - 0.5f), 1.dp.toPx())
+            Offset(size.width, size.height - 0.5f), 1f)
     }
 }
 
@@ -157,8 +157,7 @@ private fun Modifier.rim(shape: Shape, dark: Boolean, bottom: Boolean = true): M
  * bottom. Goes behind the bar's content as a sibling.
  */
 @Composable
-fun FrostFade(haze: HazeState, modifier: Modifier = Modifier) {
-    val bar = LocalChatColors.current.bar
+fun FrostFade(haze: HazeState, modifier: Modifier = Modifier, bar: Color = LocalChatColors.current.bar) {
     val style = remember(bar) {
         HazeBlurStyle {
             noiseFactor(0f)

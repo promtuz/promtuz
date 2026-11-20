@@ -1,12 +1,10 @@
 package com.promtuz.chat.ui.screens
 
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import com.promtuz.chat.ui.components.IconButton
 import com.promtuz.chat.ui.components.cardFill
 import android.content.ActivityNotFoundException
 import android.widget.Toast
-import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,10 +20,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -35,7 +31,8 @@ import androidx.compose.ui.unit.dp
 import com.promtuz.chat.ui.components.listPadding
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.ScreenScaffold
-import com.promtuz.chat.ui.components.SearchableHeader
+import com.promtuz.chat.ui.components.SearchTopBar
+import com.promtuz.chat.ui.components.rememberScreenSearch
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.SettingsRow
 import com.promtuz.chat.ui.components.Trailing
@@ -76,9 +73,8 @@ private data class LibraryLicense(
 @Composable
 fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
     val catalog by licenseAsset("licenses/index.json") { Json.decodeFromString<List<LicenseEntry>>(it) }
-    val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-    var searching by rememberSaveable { mutableStateOf(false) }
-    var query by rememberSaveable { mutableStateOf("") }
+    val search = rememberScreenSearch()
+    val query = search.query
     val libraries = remember(catalog, query) {
         catalog?.getOrNull()?.filter {
             query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) ||
@@ -88,21 +84,7 @@ fun OpenSourceLicensesScreen(onLibraryClick: (String) -> Unit) {
     }
 
     ScreenScaffold(containerColor = Promtuz.colors.groupedPage, topBar = { scrollBehavior ->
-        SearchableHeader(
-            scrollBehavior = scrollBehavior,
-            windowInsets = androidx.compose.material3.TopAppBarDefaults.windowInsets,
-            title = "Open source licenses",
-            searching = searching,
-            query = query,
-            onQuery = { query = it },
-            close = false,
-            onBack = {
-                if (searching) { searching = false; query = "" }
-                else back?.onBackPressed()
-            },
-            onSearch = { searching = true },
-            searchLabel = "Search libraries",
-        )
+        SearchTopBar("Open source licenses", search, "Search libraries", scrollBehavior)
     }) { padding ->
         LazyColumn(
             Modifier.fillMaxSize(),

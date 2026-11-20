@@ -93,9 +93,8 @@ fun SendToScreen(
     onSend: () -> Unit,
 ) {
     val c = Promtuz.colors
-    var searching by rememberSaveable { mutableStateOf(false) }
-    var query by rememberSaveable { mutableStateOf("") }
-    val closeSearch = { searching = false; query = "" }
+    val search = rememberScreenSearch()
+    val query = search.query
     BackHandler(busy) { }
     val haze = rememberHazeState()
     val density = LocalDensity.current
@@ -104,21 +103,8 @@ fun SendToScreen(
     val now = rememberPresenceTime()
     val visible = remember(targets, query) { targets.filter { it.name.contains(query.trim(), ignoreCase = true) } }
 
-    val back = androidx.activity.compose.LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     ScreenScaffold(topBar = { scrollBehavior ->
-        SearchableHeader(
-            scrollBehavior = scrollBehavior,
-            windowInsets = androidx.compose.material3.TopAppBarDefaults.windowInsets,
-            title = title,
-            searching = searching,
-            query = query,
-            onQuery = { query = it },
-            close = false,
-            enabled = !busy,
-            onBack = { if (searching) closeSearch() else back?.onBackPressed() },
-            onSearch = { searching = true },
-            searchLabel = "Search chats",
-        )
+        SearchTopBar(title, search, "Search chats", scrollBehavior, enabled = !busy)
     }) { padding ->
         Box(Modifier.fillMaxSize()) {
             LazyColumn(

@@ -205,7 +205,7 @@ internal fun RecoveryPhraseContent(
         connectionStatus = false,
         actions = {
             if (revealed != null) IconButton(onHide, Modifier.testTag("recovery-hide-top")) {
-                Icon(painterResource(R.drawable.oi_eye_slash), stringResource(R.string.recovery_hide))
+                TopBarIcon(R.drawable.oi_eye_slash, stringResource(R.string.recovery_hide))
             }
         },
     ) { padding ->

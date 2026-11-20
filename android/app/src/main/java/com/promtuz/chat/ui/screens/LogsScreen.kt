@@ -17,12 +17,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,12 +27,10 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
 import com.promtuz.chat.ui.theme.Radii
 import com.promtuz.chat.ui.components.RowSubtitleStyle
-import com.promtuz.chat.ui.components.SegmentedTabs
 import com.promtuz.chat.ui.theme.Promtuz
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
@@ -57,12 +52,16 @@ import com.promtuz.chat.BuildConfig
 import com.promtuz.chat.R
 import com.promtuz.chat.ui.components.DrawableIcon
 import com.promtuz.chat.ui.components.ScreenScaffold
-import com.promtuz.chat.ui.components.SearchableHeader
+import com.promtuz.chat.ui.components.SearchTopBar
+import com.promtuz.chat.ui.components.rememberScreenSearch
+import com.promtuz.chat.ui.components.GlassTabBar
+import com.promtuz.chat.ui.components.GlassTabItem
+import androidx.compose.foundation.layout.Box
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import com.promtuz.chat.ui.components.AppDropMenu
 import com.promtuz.chat.ui.components.MenuAction
-import com.promtuz.chat.ui.components.MorphGlyph
 import com.promtuz.chat.ui.components.AppAlertDialog
-import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
 import kotlinx.coroutines.Dispatchers
@@ -79,57 +78,44 @@ import java.util.Locale
 @Composable
 fun LogsScreen() {
     val live by AppLogger.logs.collectAsState()
-    var paused by remember { mutableStateOf<List<AppLog>?>(null) }
     var export by remember { mutableStateOf<List<AppLog>?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
-    var searching by rememberSaveable { mutableStateOf(false) }
-    var query by rememberSaveable { mutableStateOf("") }
+    val search = rememberScreenSearch()
+    val query = search.query
     var tab by rememberSaveable { mutableStateOf(0) }
     val severity = Tabs[tab].second
-    val source = paused ?: live
     // Stack traces are costly to stringify and every new line refilters, so this runs off Main.
-    val logs by produceState(emptyList(), source, query, severity) {
+    val logs by produceState(emptyList(), live, query, severity) {
         value = withContext(Dispatchers.Default) {
-            source.filter { log -> log.priority >= severity && (query.isBlank() ||
+            live.filter { log -> log.priority >= severity && (query.isBlank() ||
                 "${log.tag.orEmpty()} ${log.message} ${log.t?.stackTraceToString().orEmpty()}".contains(query.trim(), true)) }
         }
     }
-    val listState = rememberLazyListState()
-    val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-    ScreenScaffold(scrollableState = listState, containerColor = Promtuz.colors.groupedPage, topBar = { scroll ->
-        SearchableHeader(
-            title = "App logs", close = false, searching = searching, query = query,
-            onQuery = { query = it }, onSearch = { searching = true }, searchLabel = "Search logs",
-            onBack = { if (searching) { searching = false; query = "" } else back?.onBackPressed() },
-            scrollBehavior = scroll, windowInsets = TopAppBarDefaults.windowInsets,
-            showActionsWhileSearching = true,
-            actions = {
-                AppDropMenu(anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Log options") },
-                    groups = buildList {
-                        add(listOf(MenuAction(if (paused == null) "Pause updates" else "Resume updates",
-                            glyph = if (paused == null) MorphGlyph.Pause else MorphGlyph.Play) {
-                            paused = if (paused == null) live.toList() else null
-                        }))
-                        if (logs.isNotEmpty()) add(listOf(MenuAction("Export logs", R.drawable.oi_export) { export = logs.toList() }))
-                        if (live.isNotEmpty() || paused?.isNotEmpty() == true)
-                            add(listOf(MenuAction("Clear logs", R.drawable.oi_broom, destructive = true) { confirmClear = true }))
-                    })
-            },
-        )
+    val haze = rememberHazeState()
+    ScreenScaffold(containerColor = Promtuz.colors.groupedPage, topBar = { scroll ->
+        SearchTopBar("App logs", search, "Search logs", scroll, fade = true, showActionsWhileSearching = true) {
+            AppDropMenu(anchor = { DrawableIcon(R.drawable.i_more_vert, Modifier.padding(12.dp), desc = "Log options") },
+                groups = buildList {
+                    if (logs.isNotEmpty()) add(listOf(MenuAction("Export logs", R.drawable.oi_export) { export = logs.toList() }))
+                    if (live.isNotEmpty()) add(listOf(MenuAction("Clear logs", R.drawable.oi_broom, destructive = true) { confirmClear = true }))
+                })
+        }
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding() + 6.dp)) {
-            SegmentedTabs(Tabs.map { it.first }, tab, Modifier.padding(horizontal = 12.dp)) { tab = it }
-            if (paused != null) Text("Updates paused", Modifier.padding(start = 28.dp, end = 28.dp, top = 10.dp),
-                style = RowSubtitleStyle, color = Promtuz.colors.muted)
+        Box(Modifier.fillMaxSize()) {
+            LogsList(logs, Modifier.hazeSource(haze), PaddingValues(
+                start = 12.dp, end = 12.dp, top = padding.calculateTopPadding() + 6.dp,
+                bottom = padding.calculateBottomPadding() + TabBarClearance,
+            ))
             if (logs.isEmpty()) Text(if (query.isNotBlank() || severity > 0) "No matching logs" else "No logs yet",
-                Modifier.padding(horizontal = 28.dp, vertical = 16.dp), style = RowSubtitleStyle, color = Promtuz.colors.muted)
-            else LogsContainer(logs, Modifier.weight(1f), PaddingValues(bottom = padding.calculateBottomPadding()), listState)
+                Modifier.padding(start = 28.dp, end = 28.dp, top = padding.calculateTopPadding() + 16.dp),
+                style = RowSubtitleStyle, color = Promtuz.colors.muted)
+            GlassTabBar(haze, LogTabs, tab, { tab = it }, Modifier.align(Alignment.BottomCenter))
         }
     }
     export?.let { LogExportSheet(it) { export = null } }
     if (confirmClear) AppAlertDialog(onDismissRequest = { confirmClear = false },
         title = { Text("Clear logs?") }, text = { Text("This removes the current diagnostic logs. Your chats and settings stay on this device.") },
-        confirmButton = { TextButton(onClick = { AppLogger.clear(); paused = paused?.let { emptyList() }; confirmClear = false }) { Text("Clear", color = Promtuz.colors.danger) } },
+        confirmButton = { TextButton(onClick = { AppLogger.clear(); confirmClear = false }) { Text("Clear", color = Promtuz.colors.danger) } },
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })
 }
 
@@ -213,21 +199,9 @@ private fun formatLogs(logs: List<AppLog>): String {
 }
 
 @Composable
-private fun LogsContainer(
-    logs: List<AppLog>,
-    modifier: Modifier = Modifier,
-    padding: PaddingValues = PaddingValues(0.dp),
-    listState: LazyListState = rememberLazyListState(),
-) {
-    val c = Promtuz.colors
+private fun LogsList(logs: List<AppLog>, modifier: Modifier, padding: PaddingValues) {
     // Newest first with a reversed layout: the list reads top to bottom in time and follows new lines.
-    LazyColumn(
-        modifier.fillMaxWidth().fillMaxHeight(),
-        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = padding.calculateBottomPadding() + 12.dp),
-        verticalArrangement = Arrangement.Top,
-        state = listState,
-        reverseLayout = true,
-    ) {
+    LazyColumn(modifier.fillMaxSize(), contentPadding = padding, reverseLayout = true, verticalArrangement = Arrangement.Top) {
         itemsIndexed(logs, key = { _, it -> it.id }) { i, log ->
             val top = i == logs.lastIndex
             val bottom = i == 0
@@ -275,6 +249,9 @@ private fun LogEntry(log: AppLog) {
 
 private const val TraceLines = 4
 private val Tabs = listOf("All" to 0, "Info" to 4, "Errors" to 6)
+private val LogTabs = Tabs.map { GlassTabItem(it.first) }
+/** The floating tab bar's height plus its gap above the navigation bar, and room to breathe. */
+private val TabBarClearance = 62.dp
 private val LogText = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp)
 private val LogMeta = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
 

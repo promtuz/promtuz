@@ -26,5 +26,7 @@ fun bottomScrim(base: Color = MaterialTheme.colorScheme.background) =
 @Composable
 fun transparentTopAppBar() = TopAppBarDefaults.topAppBarColors(
     containerColor = Color.Transparent,
-    scrolledContainerColor = Color.Transparent
+    scrolledContainerColor = Color.Transparent,
+    navigationIconContentColor = Promtuz.colors.text,
+    actionIconContentColor = Promtuz.colors.text,
 )

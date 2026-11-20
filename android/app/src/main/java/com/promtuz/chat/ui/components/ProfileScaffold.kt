@@ -99,7 +99,7 @@ fun ProfileScaffold(
                 TopAppBar(
                     title = {}, navigationIcon = { GoBackButton() }, actions = actions,
                     windowInsets = WindowInsets(0),
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                    colors = com.promtuz.chat.ui.theme.transparentTopAppBar(),
                 )
             }
         },
